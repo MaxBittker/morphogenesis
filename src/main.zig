@@ -2,16 +2,16 @@ const std = @import("std");
 const math = std.math;
 
 // Boids simulation parameters - adjust this for stress testing
-const PARTICLE_COUNT = 10000; // Hue-based flocking with color affinity calculations
+const PARTICLE_COUNT = 2500; // Hue-based flocking with color affinity calculations
 const MAX_SPEED = 0.8;
 const MAX_FORCE = 0.05;
 const SEPARATION_RADIUS = 0.12;
 const ALIGNMENT_RADIUS = 0.25;
 const COHESION_RADIUS = 0.35;
-const WORLD_SIZE = 1.8; // Keep particles well within bounds regardless of aspect ratio
+const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
 
 // Spatial partitioning grid for O(n) performance
-const GRID_SIZE = 16; // 16x16 grid
+const GRID_SIZE = 25; // 25x25 grid
 const GRID_CELL_SIZE = WORLD_SIZE / GRID_SIZE;
 const MAX_PARTICLES_PER_CELL = 100;
 
