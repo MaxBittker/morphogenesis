@@ -197,7 +197,7 @@
 
             // Instance buffer for particle positions (will be updated each frame)
             // Allocate for stress testing - adjust based on PARTICLE_COUNT in main.zig
-            const maxParticles = 5000; // Should be >= PARTICLE_COUNT in main.zig
+            const maxParticles = 10000; // Should be >= PARTICLE_COUNT in main.zig
             instanceBuffer = device.createBuffer({
                 size: maxParticles * 2 * 4, // 2 floats per particle (x, y)
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
