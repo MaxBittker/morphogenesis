@@ -181,11 +181,8 @@ const Particle = struct {
 var particles: [PARTICLE_COUNT]Particle = undefined;
 var particles_initialized = false;
 
-// WebGPU bindings for Emscripten
+// Mock WebGPU bindings (not actually used for rendering)
 extern fn emscripten_webgpu_get_device() u32;
-extern fn emscripten_webgpu_create_render_pass_encoder(device: u32, color_attachment: u32, depth_attachment: u32) u32;
-extern fn emscripten_webgpu_render_pass_draw(encoder: u32, vertex_count: u32) void;
-extern fn emscripten_webgpu_submit_render_pass(encoder: u32) void;
 
 // Console logging
 extern fn console_log(ptr: [*]const u8, len: usize) void;
@@ -258,32 +255,11 @@ export fn get_particle_data(index: i32) f32 {
     }
 }
 
-export fn render() void {
-    if (device_handle == 0) {
-        log("Device not initialized!", .{});
-        return;
-    }
-    
-    // Create render pass
-    const render_pass = emscripten_webgpu_create_render_pass_encoder(device_handle, 0, 0);
-    
-    // Draw particles (will be handled in JavaScript)
-    emscripten_webgpu_render_pass_draw(render_pass, PARTICLE_COUNT * 3); // 3 vertices per particle triangle
-    
-    // Submit render pass
-    emscripten_webgpu_submit_render_pass(render_pass);
-}
-
+// Test functions for debugging
 export fn add(a: i32, b: i32) i32 {
-    const result = a + b;
-    log("Computing {} + {} = {}", .{ a, b, result });
-    return result;
+    return a + b;
 }
 
-// Compute shader entry point for future implementation
 export fn compute_demo(input: f32) f32 {
-    // Simple compute operation - square the input
-    const result = input * input;
-    log("Compute: {} squared = {}", .{ input, result });
-    return result;
+    return input * input;
 }

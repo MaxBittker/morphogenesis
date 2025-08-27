@@ -58,13 +58,17 @@
             }
 
             try {
-                const adapter = await navigator.gpu.requestAdapter();
-                if (!adapter) {
-                    log('Failed to get WebGPU adapter!');
-                    return false;
-                }
+                // Only create device if not already created
+                if (!device) {
+                    const adapter = await navigator.gpu.requestAdapter();
+                    if (!adapter) {
+                        log('Failed to get WebGPU adapter!');
+                        return false;
+                    }
 
-                device = await adapter.requestDevice();
+                    device = await adapter.requestDevice();
+                    log('WebGPU device created successfully');
+                }
                 context = canvas.getContext('webgpu');
                 
                 if (!context) {
@@ -77,6 +81,7 @@
                     device: device,
                     format: format,
                 });
+                log('WebGPU context configured successfully');
 
                 await createRenderPipeline();
                 log('WebGPU initialized successfully with render pipeline');
@@ -191,11 +196,13 @@
             device.queue.writeBuffer(vertexBuffer, 0, quadVertices);
 
             // Instance buffer for particle positions (will be updated each frame)
-            const particleCount = wasmModule ? wasmModule.exports.get_particle_count() : 100;
+            // Use maximum expected particle count since WASM module may not be loaded yet
+            const particleCount = 150; // Match PARTICLE_COUNT in main.zig
             instanceBuffer = device.createBuffer({
                 size: particleCount * 2 * 4, // 2 floats per particle (x, y)
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
             });
+            log(`Created instance buffer for ${particleCount} particles (${particleCount * 2 * 4} bytes)`);
 
             // Uniform buffer for aspect ratio
             uniformBuffer = device.createBuffer({
@@ -285,25 +292,9 @@
                             const buffer = new Uint8Array(memory.buffer, ptr, len);
                             const message = new TextDecoder().decode(buffer);
                             log('[WASM] ' + message);
-                        } else {
-                            log('[WASM] Log called but memory not available');
                         }
                     },
-                    emscripten_webgpu_get_device: () => {
-                        log('WASM requesting WebGPU device');
-                        return device ? 1 : 0; // Return a handle ID
-                    },
-                    emscripten_webgpu_create_render_pass_encoder: (device, colorAttachment, depthAttachment) => {
-                        log('WASM creating render pass encoder');
-                        return 1; // Mock render pass handle
-                    },
-                    emscripten_webgpu_render_pass_draw: (encoder, vertexCount) => {
-                        log(`WASM drawing ${vertexCount} vertices`);
-                        // WASM is calling the render function
-                    },
-                    emscripten_webgpu_submit_render_pass: (encoder) => {
-                        log('WASM submitting render pass');
-                    }
+                    emscripten_webgpu_get_device: () => device ? 1 : 0
                 };
 
                 const wasmResponse = await fetch('webgpu-demo.wasm');
@@ -349,27 +340,33 @@
             // Update instance buffer with particle positions
             device.queue.writeBuffer(instanceBuffer, 0, particlePositions);
 
-            const commandEncoder = device.createCommandEncoder();
-            const textureView = context.getCurrentTexture().createView();
+            try {
+                const commandEncoder = device.createCommandEncoder();
+                const textureView = context.getCurrentTexture().createView();
 
-            const renderPassDescriptor = {
-                colorAttachments: [{
-                    view: textureView,
-                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-                    loadOp: 'clear',
-                    storeOp: 'store',
-                }],
-            };
+                const renderPassDescriptor = {
+                    colorAttachments: [{
+                        view: textureView,
+                        clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, // Slightly gray to see if canvas is working
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                };
 
-            const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
-            passEncoder.setPipeline(renderPipeline);
-            passEncoder.setBindGroup(0, bindGroup);           // Bind uniform buffer
-            passEncoder.setVertexBuffer(0, vertexBuffer);      // Base quad vertices
-            passEncoder.setVertexBuffer(1, instanceBuffer);   // Particle positions
-            passEncoder.draw(6, particleCount, 0, 0);         // 6 vertices per quad (2 triangles), N instances
-            passEncoder.end();
+                const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+                passEncoder.setPipeline(renderPipeline);
+                passEncoder.setBindGroup(0, bindGroup);           // Bind uniform buffer
+                passEncoder.setVertexBuffer(0, vertexBuffer);      // Base quad vertices
+                passEncoder.setVertexBuffer(1, instanceBuffer);   // Particle positions
+                passEncoder.draw(6, particleCount, 0, 0);         // 6 vertices per quad (2 triangles), N instances
+                passEncoder.end();
 
-            device.queue.submit([commandEncoder.finish()]);
+                device.queue.submit([commandEncoder.finish()]);
+                
+            } catch (error) {
+                log('WebGPU render error: ' + error.message);
+                console.error('Full WebGPU error:', error);
+            }
 
             // Continue animation
             animationId = requestAnimationFrame(renderFrame);
@@ -385,18 +382,20 @@
                 log('Cannot continue without WebGPU support');
                 return;
             }
+            
+            // Enable WebGPU error reporting
+            device.addEventListener('uncapturederror', (event) => {
+                console.error('WebGPU uncaptured error:', event.error);
+            });
 
             const wasmOk = await loadWasm();
             if (!wasmOk) {
                 log('Cannot continue without WASM module - starting WebGPU-only demo');
-            } else {
-                // Test WASM functions
-                const addResult = wasmModule.exports.add(5, 3);
-                const computeResult = wasmModule.exports.compute_demo(4.5);
-                log(`WASM tests: add(5,3) = ${addResult}, compute(4.5) = ${computeResult}`);
-                wasmModule.exports.render(); // Call WASM render function
+                return;
             }
 
+            log(`WASM initialized ${wasmModule.exports.get_particle_count()} particles`);
+            
             log('Starting animation loop...');
             renderFrame(); // Start the animation
         }
