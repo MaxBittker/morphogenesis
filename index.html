@@ -26,6 +26,7 @@
         let context = null;
         let renderPipeline = null;
         let vertexBuffer = null;
+        let instanceBuffer = null;
         let animationId = null;
         let time = 0;
 
@@ -80,18 +81,36 @@
         }
 
         async function createRenderPipeline() {
-            // Vertex shader
+            // Instanced particle vertex shader
             const vertexShaderCode = `
+                struct VertexInput {
+                    @location(0) position: vec2<f32>,
+                    @location(1) particle_pos: vec2<f32>,
+                }
+
                 struct VertexOutput {
                     @builtin(position) position: vec4<f32>,
                     @location(0) color: vec3<f32>,
                 }
 
                 @vertex
-                fn main(@location(0) position: vec2<f32>, @location(1) color: vec3<f32>) -> VertexOutput {
+                fn main(input: VertexInput) -> VertexOutput {
                     var output: VertexOutput;
-                    output.position = vec4<f32>(position, 0.0, 1.0);
-                    output.color = color;
+                    
+                    // Create small triangle around particle position
+                    let scaled_pos = input.position * 0.02; // Small particle size
+                    let world_pos = scaled_pos + input.particle_pos;
+                    
+                    output.position = vec4<f32>(world_pos, 0.0, 1.0);
+                    
+                    // Color based on particle position for variety
+                    let hue = (input.particle_pos.x + 1.0) * 0.5;
+                    output.color = vec3<f32>(
+                        0.5 + 0.5 * sin(hue * 6.28),
+                        0.5 + 0.5 * sin(hue * 6.28 + 2.09),
+                        0.5 + 0.5 * sin(hue * 6.28 + 4.19)
+                    );
+                    
                     return output;
                 }
             `;
@@ -112,29 +131,52 @@
                 code: fragmentShaderCode
             });
 
-            // Vertex buffer layout
-            const vertexBufferLayout = {
-                arrayStride: 5 * 4, // 2 position + 3 color floats
-                attributes: [
-                    {
-                        format: 'float32x2',
-                        offset: 0,
-                        shaderLocation: 0, // position
-                    },
-                    {
-                        format: 'float32x3',
-                        offset: 2 * 4,
-                        shaderLocation: 1, // color
-                    }
-                ]
-            };
+            // Base triangle vertices (will be instanced)
+            const triangleVertices = new Float32Array([
+                 0.0,  1.0, // top
+                -1.0, -1.0, // bottom left
+                 1.0, -1.0, // bottom right
+            ]);
+
+            vertexBuffer = device.createBuffer({
+                size: triangleVertices.byteLength,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+
+            device.queue.writeBuffer(vertexBuffer, 0, triangleVertices);
+
+            // Instance buffer for particle positions (will be updated each frame)
+            const particleCount = wasmModule ? wasmModule.exports.get_particle_count() : 100;
+            instanceBuffer = device.createBuffer({
+                size: particleCount * 2 * 4, // 2 floats per particle (x, y)
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
 
             renderPipeline = device.createRenderPipeline({
                 layout: 'auto',
                 vertex: {
                     module: vertexShaderModule,
                     entryPoint: 'main',
-                    buffers: [vertexBufferLayout]
+                    buffers: [
+                        {
+                            arrayStride: 2 * 4, // 2 floats
+                            stepMode: 'vertex',
+                            attributes: [{
+                                format: 'float32x2',
+                                offset: 0,
+                                shaderLocation: 0, // position
+                            }]
+                        },
+                        {
+                            arrayStride: 2 * 4, // 2 floats  
+                            stepMode: 'instance',
+                            attributes: [{
+                                format: 'float32x2',
+                                offset: 0,
+                                shaderLocation: 1, // particle_pos
+                            }]
+                        }
+                    ]
                 },
                 fragment: {
                     module: fragmentShaderModule,
@@ -148,21 +190,7 @@
                 }
             });
 
-            // Create vertex buffer with triangle data
-            const vertices = new Float32Array([
-                // Triangle 1 - moving
-                 0.0,  0.8, 1.0, 0.0, 0.0, // top - red
-                -0.8, -0.8, 0.0, 1.0, 0.0, // bottom left - green  
-                 0.8, -0.8, 0.0, 0.0, 1.0, // bottom right - blue
-            ]);
-
-            vertexBuffer = device.createBuffer({
-                size: vertices.byteLength,
-                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-            });
-
-            device.queue.writeBuffer(vertexBuffer, 0, vertices);
-            log('Render pipeline and vertex buffer created');
+            log('Particle render pipeline created');
         }
 
         // Load and instantiate WASM module
@@ -213,30 +241,28 @@
             }
         }
 
-        // Render frame with animated triangles
+        // Render frame with Boids particles
         function renderFrame() {
-            if (!device || !context || !renderPipeline || !vertexBuffer) {
+            if (!device || !context || !renderPipeline || !vertexBuffer || !instanceBuffer || !wasmModule) {
                 return;
             }
 
             time += 0.016; // ~60fps timing
 
-            // Create animated vertex data
-            const scale = 0.5 + 0.3 * Math.sin(time);
-            const rotation = time * 0.5;
-            const cos = Math.cos(rotation) * scale;
-            const sin = Math.sin(rotation) * scale;
+            // Update particles using WASM Boids algorithm
+            wasmModule.exports.update_particles(0.016);
 
-            // Animated triangle vertices
-            const vertices = new Float32Array([
-                // Rotating triangle
-                0.0 * cos - 0.8 * sin,  0.0 * sin + 0.8 * cos,  1.0, 0.5 + 0.5 * Math.sin(time * 2), 0.0,
-                -0.7 * cos - (-0.7) * sin, -0.7 * sin + (-0.7) * cos, 0.0, 1.0, 0.5 + 0.5 * Math.sin(time * 3),
-                0.7 * cos - (-0.7) * sin,   0.7 * sin + (-0.7) * cos,  0.5 + 0.5 * Math.sin(time * 1.5), 0.0, 1.0,
-            ]);
+            // Get particle data from WASM
+            const particleCount = wasmModule.exports.get_particle_count();
+            const particlePositions = new Float32Array(particleCount * 2);
 
-            // Update vertex buffer
-            device.queue.writeBuffer(vertexBuffer, 0, vertices);
+            for (let i = 0; i < particleCount; i++) {
+                particlePositions[i * 2] = wasmModule.exports.get_particle_data(i * 2);     // x
+                particlePositions[i * 2 + 1] = wasmModule.exports.get_particle_data(i * 2 + 1); // y
+            }
+
+            // Update instance buffer with particle positions
+            device.queue.writeBuffer(instanceBuffer, 0, particlePositions);
 
             const commandEncoder = device.createCommandEncoder();
             const textureView = context.getCurrentTexture().createView();
@@ -252,8 +278,9 @@
 
             const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
             passEncoder.setPipeline(renderPipeline);
-            passEncoder.setVertexBuffer(0, vertexBuffer);
-            passEncoder.draw(3, 1, 0, 0);
+            passEncoder.setVertexBuffer(0, vertexBuffer);      // Base triangle vertices
+            passEncoder.setVertexBuffer(1, instanceBuffer);   // Particle positions
+            passEncoder.draw(3, particleCount, 0, 0);         // 3 vertices per triangle, N instances
             passEncoder.end();
 
             device.queue.submit([commandEncoder.finish()]);

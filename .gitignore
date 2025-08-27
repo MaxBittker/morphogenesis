@@ -1,0 +1,26 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+zig/
+
+# WASM output files
+*.wasm
+*.wasm.o
+main.wasm.o
+
+# Dev server logs
+server.log
+
+# macOS
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
