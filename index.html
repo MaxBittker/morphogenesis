@@ -14,10 +14,24 @@
             width: 100vw;
             height: 100vh;
         }
+        #timing-display {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid #333;
+            z-index: 1000;
+        }
     </style>
 </head>
 <body>
     <canvas id="webgpu-canvas"></canvas>
+    <div id="timing-display">Update: 0ms</div>
 
     <script>
         const canvas = document.getElementById('webgpu-canvas');
@@ -31,6 +45,8 @@
         let bindGroup = null;
         let animationId = null;
         let time = 0;
+        let updateTimeMs = 0;
+        const timingDisplay = document.getElementById('timing-display');
 
         function log(message) {
             console.log(message);
@@ -112,11 +128,11 @@
                 }
 
                 @vertex
-                fn main(input: VertexInput) -> VertexOutput {
+                fn main(input: VertexInput, @builtin(instance_index) instance_id: u32) -> VertexOutput {
                     var output: VertexOutput;
                     
-                    // Create square around particle position for circle rendering
-                    let particle_size = 0.025;
+                    // Create square around particle position for circle rendering - half size
+                    let particle_size = 0.0125; // Half the previous size (0.025 / 2)
                     var scaled_pos = input.position * particle_size;
                     
                     // Adjust for aspect ratio to keep circles circular
@@ -132,12 +148,12 @@
                     output.position = vec4<f32>(world_pos, 0.0, 1.0);
                     output.uv = input.position; // Use quad position as UV for circle calculation
                     
-                    // Color based on particle position for variety
-                    let hue = (input.particle_pos.x + 1.0) * 0.5;
+                    // Color based on particle index for stable identity-based colors
+                    let hue = f32(instance_id) * 0.01745329; // Convert index to hue (1 degree per particle)
                     output.color = vec3<f32>(
-                        0.5 + 0.5 * sin(hue * 6.28),
-                        0.5 + 0.5 * sin(hue * 6.28 + 2.09),
-                        0.5 + 0.5 * sin(hue * 6.28 + 4.19)
+                        0.5 + 0.5 * sin(hue),
+                        0.5 + 0.5 * sin(hue + 2.09439510),   // 120 degrees offset
+                        0.5 + 0.5 * sin(hue + 4.18879020)    // 240 degrees offset
                     );
                     
                     return output;
@@ -197,7 +213,7 @@
 
             // Instance buffer for particle positions (will be updated each frame)
             // Allocate for stress testing - adjust based on PARTICLE_COUNT in main.zig
-            const maxParticles = 10000; // Should be >= PARTICLE_COUNT in main.zig
+            const maxParticles = 20000; // Should be >= PARTICLE_COUNT in main.zig
             instanceBuffer = device.createBuffer({
                 size: maxParticles * 2 * 4, // 2 floats per particle (x, y)
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
@@ -325,8 +341,14 @@
             const aspectRatio = window.aspectRatio || (canvas.width / canvas.height);
             device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([aspectRatio]));
 
-            // Update particles using WASM Boids algorithm
+            // Time the particle update loop
+            const updateStart = performance.now();
             wasmModule.exports.update_particles(0.016);
+            const updateEnd = performance.now();
+            updateTimeMs = Math.round(updateEnd - updateStart);
+            
+            // Update timing display
+            timingDisplay.textContent = `Update: ${updateTimeMs}ms`;
 
             // Get particle data from WASM
             const particleCount = wasmModule.exports.get_particle_count();

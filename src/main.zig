@@ -2,13 +2,13 @@ const std = @import("std");
 const math = std.math;
 
 // Boids simulation parameters - adjust this for stress testing
-const PARTICLE_COUNT = 5000; // Optimized with spatial partitioning for stunning visual performance
+const PARTICLE_COUNT = 10000; // Hue-based flocking with color affinity calculations
 const MAX_SPEED = 0.8;
 const MAX_FORCE = 0.05;
 const SEPARATION_RADIUS = 0.12;
 const ALIGNMENT_RADIUS = 0.25;
 const COHESION_RADIUS = 0.35;
-const WORLD_SIZE = 1.8;  // Keep particles well within bounds regardless of aspect ratio
+const WORLD_SIZE = 1.8; // Keep particles well within bounds regardless of aspect ratio
 
 // Spatial partitioning grid for O(n) performance
 const GRID_SIZE = 16; // 16x16 grid
@@ -21,9 +21,9 @@ const Particle = struct {
     y: f32,
     vx: f32,
     vy: f32,
-    
+
     const Self = @This();
-    
+
     pub fn init(x: f32, y: f32) Self {
         return Self{
             .x = x,
@@ -32,35 +32,149 @@ const Particle = struct {
             .vy = (y * 0.1),
         };
     }
-    
+
     pub fn updateWithSpatialGrid(self: *Self, particle_index: u32, dt: f32) void {
-        const sep = self.separateFromGrid(particle_index);
-        const ali = self.alignmentFromGrid(particle_index);
-        const coh = self.cohesionFromGrid(particle_index);
-        
-        // Apply weighted forces for better flocking behavior
-        const sep_weight = 2.0; // Stronger separation
-        const ali_weight = 1.0; // Moderate alignment
-        const coh_weight = 1.5; // Strong cohesion
-        
-        self.vx += (sep.x * sep_weight + ali.x * ali_weight + coh.x * coh_weight) * dt;
-        self.vy += (sep.y * sep_weight + ali.y * ali_weight + coh.y * coh_weight) * dt;
-        
+        // Single-pass optimized Boids calculation with hue-based affinity
+        var sep_x: f32 = 0;
+        var sep_y: f32 = 0;
+        var sep_count: f32 = 0;
+
+        var ali_x: f32 = 0;
+        var ali_y: f32 = 0;
+        var ali_count: f32 = 0;
+
+        var coh_x: f32 = 0;
+        var coh_y: f32 = 0;
+        var coh_count: f32 = 0;
+
+        // Pre-calculate squared radii to avoid sqrt comparisons
+        const sep_radius_sq = SEPARATION_RADIUS * SEPARATION_RADIUS;
+        const ali_radius_sq = ALIGNMENT_RADIUS * ALIGNMENT_RADIUS;
+        const coh_radius_sq = COHESION_RADIUS * COHESION_RADIUS;
+
+        // Get this particle's hue for color-based affinity
+        const my_hue = getParticleHue(particle_index);
+
+        // Check current cell and 8 surrounding cells in single pass
+        const gx = worldToGrid(self.x);
+        const gy = worldToGrid(self.y);
+
+        var dy: i32 = -1;
+        while (dy <= 1) : (dy += 1) {
+            var dx: i32 = -1;
+            while (dx <= 1) : (dx += 1) {
+                const check_x = gx + dx;
+                const check_y = gy + dy;
+
+                if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
+                    const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
+
+                    for (0..cell.count) |i| {
+                        const neighbor_index = cell.particles[i];
+                        if (neighbor_index != particle_index) {
+                            const other = &particles[neighbor_index];
+                            const dist_x = self.x - other.x;
+                            const dist_y = self.y - other.y;
+                            const dist_sq = dist_x * dist_x + dist_y * dist_y;
+
+                            // Calculate hue similarity for color-based affinity
+                            const neighbor_hue = getParticleHue(neighbor_index);
+                            const hue_similarity = getHueSimilarity(my_hue, neighbor_hue);
+
+                            // Separation (closest interactions) - less affected by color
+                            if (dist_sq > 0 and dist_sq < sep_radius_sq) {
+                                const inv_dist = 1.0 / @sqrt(dist_sq);
+                                const sep_strength = 0.3 + 0.7 * hue_similarity; // Weaker separation from different colors
+                                sep_x += dist_x * inv_dist * sep_strength;
+                                sep_y += dist_y * inv_dist * sep_strength;
+                                sep_count += sep_strength;
+                            }
+
+                            // Alignment (medium range) - strongly affected by color affinity
+                            if (dist_sq > 0 and dist_sq < ali_radius_sq) {
+                                const ali_strength = hue_similarity; // Only align with similar colors
+                                ali_x += other.vx * ali_strength;
+                                ali_y += other.vy * ali_strength;
+                                ali_count += ali_strength;
+                            }
+
+                            // Cohesion (largest range) - very strongly affected by color affinity
+                            if (dist_sq > 0 and dist_sq < coh_radius_sq) {
+                                const coh_strength = hue_similarity * hue_similarity; // Quadratic preference for similar colors
+                                coh_x += other.x * coh_strength;
+                                coh_y += other.y * coh_strength;
+                                coh_count += coh_strength;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calculate final forces with color-weighted averages
+        var force_x: f32 = 0;
+        var force_y: f32 = 0;
+
+        // Separation force
+        if (sep_count > 0) {
+            sep_x /= sep_count;
+            sep_y /= sep_count;
+
+            const sep_mag = @sqrt(sep_x * sep_x + sep_y * sep_y);
+            if (sep_mag > 0) {
+                force_x += (sep_x / sep_mag) * MAX_FORCE * 2.0; // Separation weight
+                force_y += (sep_y / sep_mag) * MAX_FORCE * 2.0;
+            }
+        }
+
+        // Alignment force
+        if (ali_count > 0) {
+            ali_x /= ali_count;
+            ali_y /= ali_count;
+
+            const ali_mag = @sqrt(ali_x * ali_x + ali_y * ali_y);
+            if (ali_mag > 0) {
+                force_x += (ali_x / ali_mag) * MAX_FORCE * 1.5; // Increased alignment weight for color clustering
+                force_y += (ali_y / ali_mag) * MAX_FORCE * 1.5;
+            }
+        }
+
+        // Cohesion force
+        if (coh_count > 0) {
+            coh_x /= coh_count;
+            coh_y /= coh_count;
+
+            coh_x -= self.x; // Seek towards center
+            coh_y -= self.y;
+
+            const coh_mag = @sqrt(coh_x * coh_x + coh_y * coh_y);
+            if (coh_mag > 0) {
+                force_x += (coh_x / coh_mag) * MAX_FORCE * 2.5; // Increased cohesion weight for strong color clustering
+                force_y += (coh_y / coh_mag) * MAX_FORCE * 2.5;
+            }
+        }
+
+        // Apply forces
+        self.vx += force_x * dt;
+        self.vy += force_y * dt;
+
         // Limit speed
-        const speed = @sqrt(self.vx * self.vx + self.vy * self.vy);
-        if (speed > MAX_SPEED) {
+        const speed_sq = self.vx * self.vx + self.vy * self.vy;
+        const max_speed_sq = MAX_SPEED * MAX_SPEED;
+        if (speed_sq > max_speed_sq) {
+            const speed = @sqrt(speed_sq);
             self.vx = (self.vx / speed) * MAX_SPEED;
             self.vy = (self.vy / speed) * MAX_SPEED;
         }
-        
+
         // Update position
         self.x += self.vx * dt;
         self.y += self.vy * dt;
-        
+
         // Bounce off edges with damping
         const border = WORLD_SIZE / 2.0;
-        const bounce_force = 0.8; // Bounce damping factor
-        
+        const bounce_force = 0.8;
+
         if (self.x > border) {
             self.x = border;
             self.vx = -@abs(self.vx) * bounce_force;
@@ -78,28 +192,28 @@ const Particle = struct {
             self.vy = @abs(self.vy) * bounce_force;
         }
     }
-    
+
     fn separate(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
         var steer_x: f32 = 0;
         var steer_y: f32 = 0;
         var count: i32 = 0;
-        
+
         for (neighbors) |other| {
             const dx = self.x - other.x;
             const dy = self.y - other.y;
             const dist = @sqrt(dx * dx + dy * dy);
-            
+
             if (dist > 0 and dist < SEPARATION_RADIUS) {
                 steer_x += dx / dist;
                 steer_y += dy / dist;
                 count += 1;
             }
         }
-        
+
         if (count > 0) {
             steer_x /= @as(f32, @floatFromInt(count));
             steer_y /= @as(f32, @floatFromInt(count));
-            
+
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
@@ -107,31 +221,31 @@ const Particle = struct {
                 steer_y = (steer_y / mag) * MAX_FORCE;
             }
         }
-        
+
         return .{ .x = steer_x, .y = steer_y };
     }
-    
+
     fn alignment(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
         var sum_x: f32 = 0;
         var sum_y: f32 = 0;
         var count: i32 = 0;
-        
+
         for (neighbors) |other| {
             const dx = self.x - other.x;
             const dy = self.y - other.y;
             const dist = @sqrt(dx * dx + dy * dy);
-            
+
             if (dist > 0 and dist < ALIGNMENT_RADIUS) {
                 sum_x += other.vx;
                 sum_y += other.vy;
                 count += 1;
             }
         }
-        
+
         if (count > 0) {
             sum_x /= @as(f32, @floatFromInt(count));
             sum_y /= @as(f32, @floatFromInt(count));
-            
+
             // Normalize and scale
             const mag = @sqrt(sum_x * sum_x + sum_y * sum_y);
             if (mag > 0) {
@@ -139,68 +253,68 @@ const Particle = struct {
                 sum_y = (sum_y / mag) * MAX_FORCE;
             }
         }
-        
+
         return .{ .x = sum_x, .y = sum_y };
     }
-    
+
     fn cohesion(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
         var sum_x: f32 = 0;
         var sum_y: f32 = 0;
         var count: i32 = 0;
-        
+
         for (neighbors) |other| {
             const dx = self.x - other.x;
             const dy = self.y - other.y;
             const dist = @sqrt(dx * dx + dy * dy);
-            
+
             if (dist > 0 and dist < COHESION_RADIUS) {
                 sum_x += other.x;
                 sum_y += other.y;
                 count += 1;
             }
         }
-        
+
         if (count > 0) {
             sum_x /= @as(f32, @floatFromInt(count));
             sum_y /= @as(f32, @floatFromInt(count));
-            
+
             // Seek towards center
             var steer_x = sum_x - self.x;
             var steer_y = sum_y - self.y;
-            
+
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
                 steer_x = (steer_x / mag) * MAX_FORCE;
                 steer_y = (steer_y / mag) * MAX_FORCE;
             }
-            
+
             return .{ .x = steer_x, .y = steer_y };
         }
-        
+
         return .{ .x = 0, .y = 0 };
     }
-    
+
     // Spatial grid versions of Boids functions for O(n) performance
     fn separateFromGrid(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
         var steer_x: f32 = 0;
         var steer_y: f32 = 0;
         var count: i32 = 0;
-        
+
         // Check current cell and 8 surrounding cells
         const gx = worldToGrid(self.x);
         const gy = worldToGrid(self.y);
-        
+
         var dy: i32 = -1;
         while (dy <= 1) : (dy += 1) {
             var dx: i32 = -1;
             while (dx <= 1) : (dx += 1) {
                 const check_x = gx + dx;
                 const check_y = gy + dy;
-                
+
                 if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
                     const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
-                    
+
                     for (0..cell.count) |i| {
                         const neighbor_index = cell.particles[i];
                         if (neighbor_index != particle_index) {
@@ -208,7 +322,7 @@ const Particle = struct {
                             const dist_x = self.x - other.x;
                             const dist_y = self.y - other.y;
                             const dist = @sqrt(dist_x * dist_x + dist_y * dist_y);
-                            
+
                             if (dist > 0 and dist < SEPARATION_RADIUS) {
                                 steer_x += dist_x / dist;
                                 steer_y += dist_y / dist;
@@ -219,11 +333,11 @@ const Particle = struct {
                 }
             }
         }
-        
+
         if (count > 0) {
             steer_x /= @as(f32, @floatFromInt(count));
             steer_y /= @as(f32, @floatFromInt(count));
-            
+
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
@@ -231,29 +345,29 @@ const Particle = struct {
                 steer_y = (steer_y / mag) * MAX_FORCE;
             }
         }
-        
+
         return .{ .x = steer_x, .y = steer_y };
     }
-    
+
     fn alignmentFromGrid(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
         var sum_x: f32 = 0;
         var sum_y: f32 = 0;
         var count: i32 = 0;
-        
+
         // Check current cell and 8 surrounding cells
         const gx = worldToGrid(self.x);
         const gy = worldToGrid(self.y);
-        
+
         var dy: i32 = -1;
         while (dy <= 1) : (dy += 1) {
             var dx: i32 = -1;
             while (dx <= 1) : (dx += 1) {
                 const check_x = gx + dx;
                 const check_y = gy + dy;
-                
+
                 if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
                     const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
-                    
+
                     for (0..cell.count) |i| {
                         const neighbor_index = cell.particles[i];
                         if (neighbor_index != particle_index) {
@@ -261,7 +375,7 @@ const Particle = struct {
                             const dist_x = self.x - other.x;
                             const dist_y = self.y - other.y;
                             const dist = @sqrt(dist_x * dist_x + dist_y * dist_y);
-                            
+
                             if (dist > 0 and dist < ALIGNMENT_RADIUS) {
                                 sum_x += other.vx;
                                 sum_y += other.vy;
@@ -272,11 +386,11 @@ const Particle = struct {
                 }
             }
         }
-        
+
         if (count > 0) {
             sum_x /= @as(f32, @floatFromInt(count));
             sum_y /= @as(f32, @floatFromInt(count));
-            
+
             // Normalize and scale
             const mag = @sqrt(sum_x * sum_x + sum_y * sum_y);
             if (mag > 0) {
@@ -284,29 +398,29 @@ const Particle = struct {
                 sum_y = (sum_y / mag) * MAX_FORCE;
             }
         }
-        
+
         return .{ .x = sum_x, .y = sum_y };
     }
-    
+
     fn cohesionFromGrid(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
         var sum_x: f32 = 0;
         var sum_y: f32 = 0;
         var count: i32 = 0;
-        
+
         // Check current cell and 8 surrounding cells
         const gx = worldToGrid(self.x);
         const gy = worldToGrid(self.y);
-        
+
         var dy: i32 = -1;
         while (dy <= 1) : (dy += 1) {
             var dx: i32 = -1;
             while (dx <= 1) : (dx += 1) {
                 const check_x = gx + dx;
                 const check_y = gy + dy;
-                
+
                 if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
                     const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
-                    
+
                     for (0..cell.count) |i| {
                         const neighbor_index = cell.particles[i];
                         if (neighbor_index != particle_index) {
@@ -314,7 +428,7 @@ const Particle = struct {
                             const dist_x = self.x - other.x;
                             const dist_y = self.y - other.y;
                             const dist = @sqrt(dist_x * dist_x + dist_y * dist_y);
-                            
+
                             if (dist > 0 and dist < COHESION_RADIUS) {
                                 sum_x += other.x;
                                 sum_y += other.y;
@@ -325,25 +439,25 @@ const Particle = struct {
                 }
             }
         }
-        
+
         if (count > 0) {
             sum_x /= @as(f32, @floatFromInt(count));
             sum_y /= @as(f32, @floatFromInt(count));
-            
+
             // Seek towards center
             var steer_x = sum_x - self.x;
             var steer_y = sum_y - self.y;
-            
+
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
                 steer_x = (steer_x / mag) * MAX_FORCE;
                 steer_y = (steer_y / mag) * MAX_FORCE;
             }
-            
+
             return .{ .x = steer_x, .y = steer_y };
         }
-        
+
         return .{ .x = 0, .y = 0 };
     }
 };
@@ -352,20 +466,20 @@ const Particle = struct {
 const GridCell = struct {
     particles: [MAX_PARTICLES_PER_CELL]u32,
     count: u32,
-    
+
     const Self = @This();
-    
+
     pub fn init() Self {
         return Self{
             .particles = undefined,
             .count = 0,
         };
     }
-    
+
     pub fn clear(self: *Self) void {
         self.count = 0;
     }
-    
+
     pub fn add(self: *Self, particle_index: u32) void {
         if (self.count < MAX_PARTICLES_PER_CELL) {
             self.particles[self.count] = particle_index;
@@ -392,6 +506,28 @@ fn log(comptime fmt: []const u8, args: anytype) void {
     var buffer: [1024]u8 = undefined;
     const message = std.fmt.bufPrint(buffer[0..], fmt, args) catch "Log message too long";
     console_log(message.ptr, message.len);
+}
+
+// Color-based flocking helper functions
+fn getParticleHue(particle_index: u32) f32 {
+    // Same hue calculation as in the vertex shader
+    return @as(f32, @floatFromInt(particle_index)) * 0.01745329; // 1 degree per particle in radians
+}
+
+fn getHueSimilarity(hue1: f32, hue2: f32) f32 {
+    // Calculate the shortest angular distance between two hues (0 to 2π)
+    const tau = 6.28318530718; // 2π
+    var diff = @abs(hue1 - hue2);
+
+    // Handle wrapping around the color wheel
+    if (diff > tau * 0.5) {
+        diff = tau - diff;
+    }
+
+    // Convert to similarity (0 = opposite colors, 1 = identical colors)
+    // Use cosine for smooth falloff: cos(0) = 1, cos(π) = -1
+    const similarity = (@cos(diff) + 1.0) * 0.5; // Normalize to 0-1 range
+    return similarity;
 }
 
 // Spatial grid helper functions
@@ -442,10 +578,10 @@ export fn init() void {
     log("Initializing Boids particle system with spatial partitioning...", .{});
     device_handle = emscripten_webgpu_get_device();
     log("WebGPU device initialized: {}", .{device_handle});
-    
+
     // Initialize spatial grid
     initializeGrid();
-    
+
     // Initialize particles
     if (!particles_initialized) {
         for (&particles, 0..) |*particle, i| {
@@ -454,7 +590,7 @@ export fn init() void {
             const range = WORLD_SIZE * 0.8; // Use 80% of world size for initial spread
             const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range;
             const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range;
-            
+
             particle.* = Particle.init(x, y);
         }
         particles_initialized = true;
@@ -464,10 +600,10 @@ export fn init() void {
 
 export fn update_particles(dt: f32) void {
     if (!particles_initialized) return;
-    
+
     // Populate spatial grid with current particle positions
     populateGrid();
-    
+
     // Update each particle using spatial grid for O(n) performance
     for (0..PARTICLE_COUNT) |i| {
         var particle = &particles[i];
@@ -483,10 +619,10 @@ export fn get_particle_data(index: i32) f32 {
     if (!particles_initialized or index < 0 or index >= PARTICLE_COUNT * 2) {
         return 0.0;
     }
-    
+
     const particle_index = @divFloor(@as(usize, @intCast(index)), 2);
     const coord_index = @mod(@as(usize, @intCast(index)), 2);
-    
+
     if (coord_index == 0) {
         return particles[particle_index].x;
     } else {
