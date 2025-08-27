@@ -64,6 +64,48 @@ A real-time particle simulation system exploring artificial life and morphogenes
 - Neural networks for growth/connection decisions
 - Complex emergent behaviors and shape formation
 
+## Performance Testing & Best Practices
+
+### Stress Testing Methodology
+
+To find the optimal particle count for 60fps performance:
+
+1. **Edit particle count**: Modify `PARTICLE_COUNT` in `src/main.zig`
+   ```zig
+   const PARTICLE_COUNT = 1000; // Adjust this value
+   ```
+
+2. **Rebuild**: Run `./build.sh` to compile changes
+
+3. **Test with browser MCP**: Use browser automation to capture performance
+   - Navigate to `http://localhost:8000` 
+   - Take screenshots to verify smooth animation
+   - Monitor console for any errors
+   - Observe flocking behavior quality
+
+4. **Performance benchmarks** (tested on M3 MacBook Pro):
+   - ✅ **150 particles**: Baseline performance, excellent flocking
+   - ✅ **500 particles**: Smooth 60fps, beautiful patterns  
+   - ✅ **1000 particles**: Excellent performance, complex flocking
+   - ✅ **2000 particles**: Still smooth, dense particle interactions
+   - 🔄 **Higher counts**: Continue testing to find threshold
+
+### Testing Best Practices
+
+- **Keep it simple**: Use code comments and rebuilds rather than runtime controls
+- **Browser MCP integration**: Perfect for automated testing and screenshots
+- **Incremental testing**: Start low, increase by 500-1000 particles per test
+- **Visual verification**: Screenshots show both performance and behavior quality
+- **Git commits**: Document each test configuration for reproducibility
+
+### Buffer Allocation
+
+The JavaScript instance buffer is pre-allocated for 5000 particles. Increase this if testing higher counts:
+
+```javascript
+const maxParticles = 5000; // Adjust for higher particle counts
+```
+
 ## Goal
 
 Build a web-based, high-performance simulation platform that layers interactions incrementally, starting with fundamental particle dynamics and evolving toward complex morphogenesis.

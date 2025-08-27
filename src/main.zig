@@ -1,8 +1,8 @@
 const std = @import("std");
 const math = std.math;
 
-// Boids simulation parameters  
-const PARTICLE_COUNT = 150;
+// Boids simulation parameters - adjust this for stress testing
+const PARTICLE_COUNT = 1000; // Optimized for performance and visual appeal
 const MAX_SPEED = 0.8;
 const MAX_FORCE = 0.05;
 const SEPARATION_RADIUS = 0.12;

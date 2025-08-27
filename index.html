@@ -196,13 +196,13 @@
             device.queue.writeBuffer(vertexBuffer, 0, quadVertices);
 
             // Instance buffer for particle positions (will be updated each frame)
-            // Use maximum expected particle count since WASM module may not be loaded yet
-            const particleCount = 150; // Match PARTICLE_COUNT in main.zig
+            // Allocate for stress testing - adjust based on PARTICLE_COUNT in main.zig
+            const maxParticles = 5000; // Should be >= PARTICLE_COUNT in main.zig
             instanceBuffer = device.createBuffer({
-                size: particleCount * 2 * 4, // 2 floats per particle (x, y)
+                size: maxParticles * 2 * 4, // 2 floats per particle (x, y)
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
             });
-            log(`Created instance buffer for ${particleCount} particles (${particleCount * 2 * 4} bytes)`);
+            log(`Created instance buffer for up to ${maxParticles} particles`);
 
             // Uniform buffer for aspect ratio
             uniformBuffer = device.createBuffer({
