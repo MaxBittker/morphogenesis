@@ -9,6 +9,12 @@ A real-time particle simulation system exploring artificial life and morphogenes
 - **Real-time Animation**: Smooth 60fps particle animations
 - **Fullscreen Experience**: Immersive particle simulations
 
+## Prerequisites
+
+- **Zig 0.13.0+** - [Download from ziglang.org](https://ziglang.org/download/)
+- **Python 3** - For local development server
+- **WebGPU-compatible browser** - Chrome, Firefox, or Safari
+
 ## Quick Start
 
 1. **Build the project**:
