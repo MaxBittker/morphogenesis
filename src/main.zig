@@ -1,15 +1,14 @@
 const std = @import("std");
 const math = std.math;
 
-// Boids simulation parameters
-const PARTICLE_COUNT = 100;
-const MAX_SPEED = 0.5;
-const MAX_FORCE = 0.02;
-const SEPARATION_RADIUS = 0.3;
-const ALIGNMENT_RADIUS = 0.6;
-const COHESION_RADIUS = 0.8;
-const WORLD_WIDTH = 2.0;  // Normalized device coordinates
-const WORLD_HEIGHT = 2.0;
+// Boids simulation parameters  
+const PARTICLE_COUNT = 150;
+const MAX_SPEED = 0.8;
+const MAX_FORCE = 0.05;
+const SEPARATION_RADIUS = 0.12;
+const ALIGNMENT_RADIUS = 0.25;
+const COHESION_RADIUS = 0.35;
+const WORLD_SIZE = 1.8;  // Keep particles well within bounds regardless of aspect ratio
 
 // Particle structure for Boids
 const Particle = struct {
@@ -34,9 +33,13 @@ const Particle = struct {
         const ali = self.alignment(neighbors);
         const coh = self.cohesion(neighbors);
         
-        // Apply forces
-        self.vx += (sep.x + ali.x + coh.x) * dt;
-        self.vy += (sep.y + ali.y + coh.y) * dt;
+        // Apply weighted forces for better flocking behavior
+        const sep_weight = 2.0; // Stronger separation
+        const ali_weight = 1.0; // Moderate alignment
+        const coh_weight = 1.5; // Strong cohesion
+        
+        self.vx += (sep.x * sep_weight + ali.x * ali_weight + coh.x * coh_weight) * dt;
+        self.vy += (sep.y * sep_weight + ali.y * ali_weight + coh.y * coh_weight) * dt;
         
         // Limit speed
         const speed = @sqrt(self.vx * self.vx + self.vy * self.vy);
@@ -49,11 +52,26 @@ const Particle = struct {
         self.x += self.vx * dt;
         self.y += self.vy * dt;
         
-        // Wrap around edges
-        if (self.x > WORLD_WIDTH / 2.0) self.x = -WORLD_WIDTH / 2.0;
-        if (self.x < -WORLD_WIDTH / 2.0) self.x = WORLD_WIDTH / 2.0;
-        if (self.y > WORLD_HEIGHT / 2.0) self.y = -WORLD_HEIGHT / 2.0;
-        if (self.y < -WORLD_HEIGHT / 2.0) self.y = WORLD_HEIGHT / 2.0;
+        // Bounce off edges with damping
+        const border = WORLD_SIZE / 2.0;
+        const bounce_force = 0.8; // Bounce damping factor
+        
+        if (self.x > border) {
+            self.x = border;
+            self.vx = -@abs(self.vx) * bounce_force;
+        }
+        if (self.x < -border) {
+            self.x = -border;
+            self.vx = @abs(self.vx) * bounce_force;
+        }
+        if (self.y > border) {
+            self.y = border;
+            self.vy = -@abs(self.vy) * bounce_force;
+        }
+        if (self.y < -border) {
+            self.y = -border;
+            self.vy = @abs(self.vy) * bounce_force;
+        }
     }
     
     fn separate(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
@@ -188,12 +206,13 @@ export fn init() void {
     // Initialize particles
     if (!particles_initialized) {
         for (&particles, 0..) |*particle, i| {
-            const angle = @as(f32, @floatFromInt(i)) * 2.0 * math.pi / @as(f32, @floatFromInt(PARTICLE_COUNT));
-            const radius = 0.3;
-            particle.* = Particle.init(
-                @cos(angle) * radius,
-                @sin(angle) * radius
-            );
+            // More random distribution using simple pseudo-random
+            const seed = @as(f32, @floatFromInt(i));
+            const range = WORLD_SIZE * 0.8; // Use 80% of world size for initial spread
+            const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range;
+            const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range;
+            
+            particle.* = Particle.init(x, y);
         }
         particles_initialized = true;
         log("Initialized {} particles", .{PARTICLE_COUNT});

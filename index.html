@@ -27,6 +27,8 @@
         let renderPipeline = null;
         let vertexBuffer = null;
         let instanceBuffer = null;
+        let uniformBuffer = null;
+        let bindGroup = null;
         let animationId = null;
         let time = 0;
 
@@ -39,6 +41,11 @@
         function resizeCanvas() {
             canvas.width = window.innerWidth * devicePixelRatio;
             canvas.height = window.innerHeight * devicePixelRatio;
+            canvas.style.width = window.innerWidth + 'px';
+            canvas.style.height = window.innerHeight + 'px';
+            
+            // Store aspect ratio for coordinate transformation
+            window.aspectRatio = canvas.width / canvas.height;
         }
 
         window.addEventListener('resize', resizeCanvas);
@@ -83,6 +90,11 @@
         async function createRenderPipeline() {
             // Instanced particle vertex shader
             const vertexShaderCode = `
+                struct Uniforms {
+                    aspect_ratio: f32,
+                }
+                @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
                 struct VertexInput {
                     @location(0) position: vec2<f32>,
                     @location(1) particle_pos: vec2<f32>,
@@ -91,17 +103,29 @@
                 struct VertexOutput {
                     @builtin(position) position: vec4<f32>,
                     @location(0) color: vec3<f32>,
+                    @location(1) uv: vec2<f32>,
                 }
 
                 @vertex
                 fn main(input: VertexInput) -> VertexOutput {
                     var output: VertexOutput;
                     
-                    // Create small triangle around particle position
-                    let scaled_pos = input.position * 0.02; // Small particle size
-                    let world_pos = scaled_pos + input.particle_pos;
+                    // Create square around particle position for circle rendering
+                    let particle_size = 0.025;
+                    var scaled_pos = input.position * particle_size;
                     
+                    // Adjust for aspect ratio to keep circles circular
+                    if (uniforms.aspect_ratio > 1.0) {
+                        // Wide screen: compress X
+                        scaled_pos.x = scaled_pos.x / uniforms.aspect_ratio;
+                    } else {
+                        // Tall screen: compress Y  
+                        scaled_pos.y = scaled_pos.y * uniforms.aspect_ratio;
+                    }
+                    
+                    let world_pos = scaled_pos + input.particle_pos;
                     output.position = vec4<f32>(world_pos, 0.0, 1.0);
+                    output.uv = input.position; // Use quad position as UV for circle calculation
                     
                     // Color based on particle position for variety
                     let hue = (input.particle_pos.x + 1.0) * 0.5;
@@ -115,11 +139,26 @@
                 }
             `;
 
-            // Fragment shader
+            // Fragment shader with circle rendering
             const fragmentShaderCode = `
                 @fragment
-                fn main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
-                    return vec4<f32>(color, 1.0);
+                fn main(@location(0) color: vec3<f32>, @location(1) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                    // Calculate distance from center of quad
+                    let dist = length(uv);
+                    
+                    // Create circle with smooth edges
+                    let circle = 1.0 - smoothstep(0.8, 1.0, dist);
+                    
+                    // Add inner glow effect
+                    let glow = 1.0 - smoothstep(0.0, 0.6, dist);
+                    let intensity = circle * (0.7 + 0.3 * glow);
+                    
+                    // Apply alpha based on circle shape
+                    if (circle < 0.01) {
+                        discard;
+                    }
+                    
+                    return vec4<f32>(color * intensity, circle);
                 }
             `;
 
@@ -131,19 +170,25 @@
                 code: fragmentShaderCode
             });
 
-            // Base triangle vertices (will be instanced)
-            const triangleVertices = new Float32Array([
-                 0.0,  1.0, // top
+            // Base quad vertices (will be instanced) for circle rendering
+            const quadVertices = new Float32Array([
+                // First triangle
                 -1.0, -1.0, // bottom left
                  1.0, -1.0, // bottom right
+                -1.0,  1.0, // top left
+                
+                // Second triangle  
+                 1.0, -1.0, // bottom right
+                 1.0,  1.0, // top right
+                -1.0,  1.0, // top left
             ]);
 
             vertexBuffer = device.createBuffer({
-                size: triangleVertices.byteLength,
+                size: quadVertices.byteLength,
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
             });
 
-            device.queue.writeBuffer(vertexBuffer, 0, triangleVertices);
+            device.queue.writeBuffer(vertexBuffer, 0, quadVertices);
 
             // Instance buffer for particle positions (will be updated each frame)
             const particleCount = wasmModule ? wasmModule.exports.get_particle_count() : 100;
@@ -152,8 +197,23 @@
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
             });
 
+            // Uniform buffer for aspect ratio
+            uniformBuffer = device.createBuffer({
+                size: 4, // 1 f32 for aspect ratio
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+
+            // Create bind group layout
+            const bindGroupLayout = device.createBindGroupLayout({
+                entries: [{
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: 'uniform' }
+                }]
+            });
+
             renderPipeline = device.createRenderPipeline({
-                layout: 'auto',
+                layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
                 vertex: {
                     module: vertexShaderModule,
                     entryPoint: 'main',
@@ -182,12 +242,33 @@
                     module: fragmentShaderModule,
                     entryPoint: 'main',
                     targets: [{
-                        format: navigator.gpu.getPreferredCanvasFormat()
+                        format: navigator.gpu.getPreferredCanvasFormat(),
+                        blend: {
+                            color: {
+                                srcFactor: 'src-alpha',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add'
+                            },
+                            alpha: {
+                                srcFactor: 'src-alpha',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add'
+                            }
+                        }
                     }]
                 },
                 primitive: {
                     topology: 'triangle-list'
                 }
+            });
+
+            // Create bind group
+            bindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: uniformBuffer }
+                }]
             });
 
             log('Particle render pipeline created');
@@ -243,11 +324,15 @@
 
         // Render frame with Boids particles
         function renderFrame() {
-            if (!device || !context || !renderPipeline || !vertexBuffer || !instanceBuffer || !wasmModule) {
+            if (!device || !context || !renderPipeline || !vertexBuffer || !instanceBuffer || !uniformBuffer || !bindGroup || !wasmModule) {
                 return;
             }
 
             time += 0.016; // ~60fps timing
+
+            // Update aspect ratio uniform
+            const aspectRatio = window.aspectRatio || (canvas.width / canvas.height);
+            device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([aspectRatio]));
 
             // Update particles using WASM Boids algorithm
             wasmModule.exports.update_particles(0.016);
@@ -278,9 +363,10 @@
 
             const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
             passEncoder.setPipeline(renderPipeline);
-            passEncoder.setVertexBuffer(0, vertexBuffer);      // Base triangle vertices
+            passEncoder.setBindGroup(0, bindGroup);           // Bind uniform buffer
+            passEncoder.setVertexBuffer(0, vertexBuffer);      // Base quad vertices
             passEncoder.setVertexBuffer(1, instanceBuffer);   // Particle positions
-            passEncoder.draw(3, particleCount, 0, 0);         // 3 vertices per triangle, N instances
+            passEncoder.draw(6, particleCount, 0, 0);         // 6 vertices per quad (2 triangles), N instances
             passEncoder.end();
 
             device.queue.submit([commandEncoder.finish()]);
