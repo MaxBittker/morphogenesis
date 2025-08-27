@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Zig WebGPU Demo</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="webgpu-canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('webgpu-canvas');
+        let wasmModule = null;
+        let device = null;
+        let context = null;
+        let renderPipeline = null;
+        let vertexBuffer = null;
+        let animationId = null;
+        let time = 0;
+
+        function log(message) {
+            console.log(message);
+        }
+
+
+        // Set canvas size to match viewport
+        function resizeCanvas() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        async function initWebGPU() {
+            if (!navigator.gpu) {
+                log('WebGPU not supported in this browser!');
+                return false;
+            }
+
+            try {
+                const adapter = await navigator.gpu.requestAdapter();
+                if (!adapter) {
+                    log('Failed to get WebGPU adapter!');
+                    return false;
+                }
+
+                device = await adapter.requestDevice();
+                context = canvas.getContext('webgpu');
+                
+                if (!context) {
+                    log('Failed to get WebGPU context!');
+                    return false;
+                }
+
+                const format = navigator.gpu.getPreferredCanvasFormat();
+                context.configure({
+                    device: device,
+                    format: format,
+                });
+
+                await createRenderPipeline();
+                log('WebGPU initialized successfully with render pipeline');
+                return true;
+            } catch (error) {
+                log('WebGPU initialization error: ' + error.message);
+                return false;
+            }
+        }
+
+        async function createRenderPipeline() {
+            // Vertex shader
+            const vertexShaderCode = `
+                struct VertexOutput {
+                    @builtin(position) position: vec4<f32>,
+                    @location(0) color: vec3<f32>,
+                }
+
+                @vertex
+                fn main(@location(0) position: vec2<f32>, @location(1) color: vec3<f32>) -> VertexOutput {
+                    var output: VertexOutput;
+                    output.position = vec4<f32>(position, 0.0, 1.0);
+                    output.color = color;
+                    return output;
+                }
+            `;
+
+            // Fragment shader
+            const fragmentShaderCode = `
+                @fragment
+                fn main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
+                    return vec4<f32>(color, 1.0);
+                }
+            `;
+
+            const vertexShaderModule = device.createShaderModule({
+                code: vertexShaderCode
+            });
+
+            const fragmentShaderModule = device.createShaderModule({
+                code: fragmentShaderCode
+            });
+
+            // Vertex buffer layout
+            const vertexBufferLayout = {
+                arrayStride: 5 * 4, // 2 position + 3 color floats
+                attributes: [
+                    {
+                        format: 'float32x2',
+                        offset: 0,
+                        shaderLocation: 0, // position
+                    },
+                    {
+                        format: 'float32x3',
+                        offset: 2 * 4,
+                        shaderLocation: 1, // color
+                    }
+                ]
+            };
+
+            renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: vertexShaderModule,
+                    entryPoint: 'main',
+                    buffers: [vertexBufferLayout]
+                },
+                fragment: {
+                    module: fragmentShaderModule,
+                    entryPoint: 'main',
+                    targets: [{
+                        format: navigator.gpu.getPreferredCanvasFormat()
+                    }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+
+            // Create vertex buffer with triangle data
+            const vertices = new Float32Array([
+                // Triangle 1 - moving
+                 0.0,  0.8, 1.0, 0.0, 0.0, // top - red
+                -0.8, -0.8, 0.0, 1.0, 0.0, // bottom left - green  
+                 0.8, -0.8, 0.0, 0.0, 1.0, // bottom right - blue
+            ]);
+
+            vertexBuffer = device.createBuffer({
+                size: vertices.byteLength,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+
+            device.queue.writeBuffer(vertexBuffer, 0, vertices);
+            log('Render pipeline and vertex buffer created');
+        }
+
+        // Load and instantiate WASM module
+        async function loadWasm() {
+            try {
+                // Environment for WASM module
+                const env = {
+                    console_log: (ptr, len) => {
+                        if (wasmModule && wasmModule.exports.memory) {
+                            const memory = wasmModule.exports.memory;
+                            const buffer = new Uint8Array(memory.buffer, ptr, len);
+                            const message = new TextDecoder().decode(buffer);
+                            log('[WASM] ' + message);
+                        } else {
+                            log('[WASM] Log called but memory not available');
+                        }
+                    },
+                    emscripten_webgpu_get_device: () => {
+                        log('WASM requesting WebGPU device');
+                        return device ? 1 : 0; // Return a handle ID
+                    },
+                    emscripten_webgpu_create_render_pass_encoder: (device, colorAttachment, depthAttachment) => {
+                        log('WASM creating render pass encoder');
+                        return 1; // Mock render pass handle
+                    },
+                    emscripten_webgpu_render_pass_draw: (encoder, vertexCount) => {
+                        log(`WASM drawing ${vertexCount} vertices`);
+                        // WASM is calling the render function
+                    },
+                    emscripten_webgpu_submit_render_pass: (encoder) => {
+                        log('WASM submitting render pass');
+                    }
+                };
+
+                const wasmResponse = await fetch('webgpu-demo.wasm');
+                const wasmBytes = await wasmResponse.arrayBuffer();
+                const wasmObj = await WebAssembly.instantiate(wasmBytes, { env: env });
+                
+                wasmModule = wasmObj.instance;
+                log('WASM module loaded successfully');
+                
+                // Initialize the WASM module
+                wasmModule.exports.init();
+                return true;
+            } catch (error) {
+                log('WASM loading error: ' + error.message);
+                return false;
+            }
+        }
+
+        // Render frame with animated triangles
+        function renderFrame() {
+            if (!device || !context || !renderPipeline || !vertexBuffer) {
+                return;
+            }
+
+            time += 0.016; // ~60fps timing
+
+            // Create animated vertex data
+            const scale = 0.5 + 0.3 * Math.sin(time);
+            const rotation = time * 0.5;
+            const cos = Math.cos(rotation) * scale;
+            const sin = Math.sin(rotation) * scale;
+
+            // Animated triangle vertices
+            const vertices = new Float32Array([
+                // Rotating triangle
+                0.0 * cos - 0.8 * sin,  0.0 * sin + 0.8 * cos,  1.0, 0.5 + 0.5 * Math.sin(time * 2), 0.0,
+                -0.7 * cos - (-0.7) * sin, -0.7 * sin + (-0.7) * cos, 0.0, 1.0, 0.5 + 0.5 * Math.sin(time * 3),
+                0.7 * cos - (-0.7) * sin,   0.7 * sin + (-0.7) * cos,  0.5 + 0.5 * Math.sin(time * 1.5), 0.0, 1.0,
+            ]);
+
+            // Update vertex buffer
+            device.queue.writeBuffer(vertexBuffer, 0, vertices);
+
+            const commandEncoder = device.createCommandEncoder();
+            const textureView = context.getCurrentTexture().createView();
+
+            const renderPassDescriptor = {
+                colorAttachments: [{
+                    view: textureView,
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            };
+
+            const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+            passEncoder.setPipeline(renderPipeline);
+            passEncoder.setVertexBuffer(0, vertexBuffer);
+            passEncoder.draw(3, 1, 0, 0);
+            passEncoder.end();
+
+            device.queue.submit([commandEncoder.finish()]);
+
+            // Continue animation
+            animationId = requestAnimationFrame(renderFrame);
+        }
+
+
+        // Initialize everything
+        async function init() {
+            log('Starting WebGPU + Zig WASM demo...');
+            
+            const webgpuOk = await initWebGPU();
+            if (!webgpuOk) {
+                log('Cannot continue without WebGPU support');
+                return;
+            }
+
+            const wasmOk = await loadWasm();
+            if (!wasmOk) {
+                log('Cannot continue without WASM module - starting WebGPU-only demo');
+            } else {
+                // Test WASM functions
+                const addResult = wasmModule.exports.add(5, 3);
+                const computeResult = wasmModule.exports.compute_demo(4.5);
+                log(`WASM tests: add(5,3) = ${addResult}, compute(4.5) = ${computeResult}`);
+                wasmModule.exports.render(); // Call WASM render function
+            }
+
+            log('Starting animation loop...');
+            renderFrame(); // Start the animation
+        }
+
+        // Start when page loads
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
