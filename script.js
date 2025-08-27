@@ -3,10 +3,14 @@ let wasmModule = null;
 let device = null;
 let context = null;
 let renderPipeline = null;
+let gridRenderPipeline = null;
 let vertexBuffer = null;
+let gridVertexBuffer = null;
 let instanceBuffer = null;
 let uniformBuffer = null;
 let bindGroup = null;
+let gridBindGroup = null;
+let gridLinesCount = 0;
 let animationId = null;
 let time = 0;
 let updateTimeMs = 0;
@@ -95,7 +99,7 @@ async function createRenderPipeline() {
                     var output: VertexOutput;
                     
                     // Create square around particle position for circle rendering - half size
-                    let particle_size = 0.0125; // Half the previous size (0.025 / 2)
+                    let particle_size = 0.008; 
                     var scaled_pos = input.position * particle_size;
                     
                     // Adjust for aspect ratio to keep circles circular
@@ -146,12 +150,49 @@ async function createRenderPipeline() {
                 }
             `;
 
+  // Grid visualization shaders
+  const gridVertexShaderCode = `
+                struct Uniforms {
+                    aspect_ratio: f32,
+                }
+                @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+                
+                @vertex
+                fn main(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
+                    var scaled_pos = position;
+                    
+                    // Adjust for aspect ratio
+                    if (uniforms.aspect_ratio > 1.0) {
+                        scaled_pos.x = scaled_pos.x / uniforms.aspect_ratio;
+                    } else {
+                        scaled_pos.y = scaled_pos.y * uniforms.aspect_ratio;
+                    }
+                    
+                    return vec4<f32>(scaled_pos, 0.0, 1.0);
+                }
+            `;
+
+  const gridFragmentShaderCode = `
+                @fragment
+                fn main() -> @location(0) vec4<f32> {
+                    return vec4<f32>(0.2, 0.4, 0.8, 0.15); // Subtle blue grid lines
+                }
+            `;
+
   const vertexShaderModule = device.createShaderModule({
     code: vertexShaderCode,
   });
 
   const fragmentShaderModule = device.createShaderModule({
     code: fragmentShaderCode,
+  });
+
+  const gridVertexShaderModule = device.createShaderModule({
+    code: gridVertexShaderCode,
+  });
+
+  const gridFragmentShaderModule = device.createShaderModule({
+    code: gridFragmentShaderCode,
   });
 
   // Base quad vertices (will be instanced) for circle rendering
@@ -188,6 +229,31 @@ async function createRenderPipeline() {
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
   log(`Created instance buffer for up to ${maxParticles} particles`);
+
+  // Create grid lines for 25x25 spatial grid
+  const gridSize = 25;
+  const worldSize = 1.95;
+  const gridLines = [];
+  
+  // Vertical lines
+  for (let i = 0; i <= gridSize; i++) {
+    const x = (i / gridSize) * worldSize - worldSize / 2;
+    gridLines.push(x, -worldSize / 2, x, worldSize / 2);
+  }
+  
+  // Horizontal lines  
+  for (let i = 0; i <= gridSize; i++) {
+    const y = (i / gridSize) * worldSize - worldSize / 2;
+    gridLines.push(-worldSize / 2, y, worldSize / 2, y);
+  }
+  
+  gridVertexBuffer = device.createBuffer({
+    size: gridLines.length * 4,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+  
+  device.queue.writeBuffer(gridVertexBuffer, 0, new Float32Array(gridLines));
+  gridLinesCount = gridLines.length / 2; // Each line has 2 vertices
 
   // Uniform buffer for aspect ratio
   uniformBuffer = device.createBuffer({
@@ -275,7 +341,65 @@ async function createRenderPipeline() {
     ],
   });
 
-  log("Particle render pipeline created");
+  // Create grid render pipeline
+  gridRenderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({
+      bindGroupLayouts: [bindGroupLayout],
+    }),
+    vertex: {
+      module: gridVertexShaderModule,
+      entryPoint: "main",
+      buffers: [
+        {
+          arrayStride: 2 * 4, // 2 floats per vertex
+          stepMode: "vertex",
+          attributes: [
+            {
+              format: "float32x2",
+              offset: 0,
+              shaderLocation: 0,
+            },
+          ],
+        },
+      ],
+    },
+    fragment: {
+      module: gridFragmentShaderModule,
+      entryPoint: "main",
+      targets: [
+        {
+          format: navigator.gpu.getPreferredCanvasFormat(),
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
+      ],
+    },
+    primitive: {
+      topology: "line-list",
+    },
+  });
+
+  gridBindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      {
+        binding: 0,
+        resource: { buffer: uniformBuffer },
+      },
+    ],
+  });
+
+  log("Particle and grid render pipelines created");
 }
 
 // Load and instantiate WASM module
@@ -379,11 +503,20 @@ function renderFrame() {
 
     const passEncoder =
       commandEncoder.beginRenderPass(renderPassDescriptor);
+    
+    // Draw spatial grid first (background)
+    passEncoder.setPipeline(gridRenderPipeline);
+    passEncoder.setBindGroup(0, gridBindGroup);
+    passEncoder.setVertexBuffer(0, gridVertexBuffer);
+    passEncoder.draw(gridLinesCount, 1, 0, 0); // Draw all grid lines
+    
+    // Draw particles on top
     passEncoder.setPipeline(renderPipeline);
     passEncoder.setBindGroup(0, bindGroup); // Bind uniform buffer
     passEncoder.setVertexBuffer(0, vertexBuffer); // Base quad vertices
     passEncoder.setVertexBuffer(1, instanceBuffer); // Particle positions
     passEncoder.draw(6, particleCount, 0, 0); // 6 vertices per quad (2 triangles), N instances
+    
     passEncoder.end();
 
     device.queue.submit([commandEncoder.finish()]);

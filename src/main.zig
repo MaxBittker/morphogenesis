@@ -3,17 +3,26 @@ const math = std.math;
 
 // Boids simulation parameters - adjust this for stress testing
 const PARTICLE_COUNT = 2500; // Hue-based flocking with color affinity calculations
-const MAX_SPEED = 0.8;
-const MAX_FORCE = 0.05;
-const SEPARATION_RADIUS = 0.12;
-const ALIGNMENT_RADIUS = 0.25;
-const COHESION_RADIUS = 0.35;
+const MAX_SPEED = 0.2;
+const MAX_FORCE = 0.3;
+const SEPARATION_RADIUS = 0.016;
+const ALIGNMENT_RADIUS = 0.15;
+const COHESION_RADIUS = 0.25;
 const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
+
+// Force strength multipliers
+const SEPARATION_STRENGTH = 20.0;
+const ALIGNMENT_STRENGTH = 1.5;
+const COHESION_STRENGTH = 1.5;
 
 // Spatial partitioning grid for O(n) performance
 const GRID_SIZE = 25; // 25x25 grid
 const GRID_CELL_SIZE = WORLD_SIZE / GRID_SIZE;
-const MAX_PARTICLES_PER_CELL = 100;
+const MAX_PARTICLES_PER_CELL = 500;
+
+// Pre-calculated constants for worldToGrid optimization
+const GRID_SCALE = @as(f32, GRID_SIZE) / WORLD_SIZE;
+const WORLD_HALF = WORLD_SIZE / 2.0;
 
 // Particle structure for Boids
 const Particle = struct {
@@ -81,18 +90,17 @@ const Particle = struct {
                             const neighbor_hue = getParticleHue(neighbor_index);
                             const hue_similarity = getHueSimilarity(my_hue, neighbor_hue);
 
-                            // Separation (closest interactions) - less affected by color
+                            // Separation (closest interactions) - purely distance-based, no color influence
                             if (dist_sq > 0 and dist_sq < sep_radius_sq) {
                                 const inv_dist = 1.0 / @sqrt(dist_sq);
-                                const sep_strength = 0.3 + 0.7 * hue_similarity; // Weaker separation from different colors
-                                sep_x += dist_x * inv_dist * sep_strength;
-                                sep_y += dist_y * inv_dist * sep_strength;
-                                sep_count += sep_strength;
+                                sep_x += dist_x * inv_dist;
+                                sep_y += dist_y * inv_dist;
+                                sep_count += 1.0;
                             }
 
                             // Alignment (medium range) - strongly affected by color affinity
                             if (dist_sq > 0 and dist_sq < ali_radius_sq) {
-                                const ali_strength = hue_similarity; // Only align with similar colors
+                                const ali_strength = hue_similarity * hue_similarity * hue_similarity; // Cubic preference for tighter grouping
                                 ali_x += other.vx * ali_strength;
                                 ali_y += other.vy * ali_strength;
                                 ali_count += ali_strength;
@@ -100,7 +108,7 @@ const Particle = struct {
 
                             // Cohesion (largest range) - very strongly affected by color affinity
                             if (dist_sq > 0 and dist_sq < coh_radius_sq) {
-                                const coh_strength = hue_similarity * hue_similarity; // Quadratic preference for similar colors
+                                const coh_strength = hue_similarity * hue_similarity * hue_similarity * hue_similarity; // Quartic preference for very tight color grouping
                                 coh_x += other.x * coh_strength;
                                 coh_y += other.y * coh_strength;
                                 coh_count += coh_strength;
@@ -122,8 +130,8 @@ const Particle = struct {
 
             const sep_mag = @sqrt(sep_x * sep_x + sep_y * sep_y);
             if (sep_mag > 0) {
-                force_x += (sep_x / sep_mag) * MAX_FORCE * 2.0; // Separation weight
-                force_y += (sep_y / sep_mag) * MAX_FORCE * 2.0;
+                force_x += (sep_x / sep_mag) * MAX_FORCE * SEPARATION_STRENGTH;
+                force_y += (sep_y / sep_mag) * MAX_FORCE * SEPARATION_STRENGTH;
             }
         }
 
@@ -134,8 +142,8 @@ const Particle = struct {
 
             const ali_mag = @sqrt(ali_x * ali_x + ali_y * ali_y);
             if (ali_mag > 0) {
-                force_x += (ali_x / ali_mag) * MAX_FORCE * 1.5; // Increased alignment weight for color clustering
-                force_y += (ali_y / ali_mag) * MAX_FORCE * 1.5;
+                force_x += (ali_x / ali_mag) * MAX_FORCE * ALIGNMENT_STRENGTH;
+                force_y += (ali_y / ali_mag) * MAX_FORCE * ALIGNMENT_STRENGTH;
             }
         }
 
@@ -149,8 +157,8 @@ const Particle = struct {
 
             const coh_mag = @sqrt(coh_x * coh_x + coh_y * coh_y);
             if (coh_mag > 0) {
-                force_x += (coh_x / coh_mag) * MAX_FORCE * 2.5; // Increased cohesion weight for strong color clustering
-                force_y += (coh_y / coh_mag) * MAX_FORCE * 2.5;
+                force_x += (coh_x / coh_mag) * MAX_FORCE * COHESION_STRENGTH;
+                force_y += (coh_y / coh_mag) * MAX_FORCE * COHESION_STRENGTH;
             }
         }
 
@@ -531,10 +539,9 @@ fn getHueSimilarity(hue1: f32, hue2: f32) f32 {
 }
 
 // Spatial grid helper functions
-fn worldToGrid(world_pos: f32) i32 {
-    // Convert world position (-WORLD_SIZE/2 to WORLD_SIZE/2) to grid coordinates (0 to GRID_SIZE-1)
-    const normalized = (world_pos + WORLD_SIZE / 2.0) / WORLD_SIZE;
-    const grid_pos = @as(i32, @intFromFloat(normalized * GRID_SIZE));
+inline fn worldToGrid(world_pos: f32) i32 {
+    // Optimized: single multiply instead of add + divide + multiply
+    const grid_pos = @as(i32, @intFromFloat((world_pos + WORLD_HALF) * GRID_SCALE));
     return @max(0, @min(GRID_SIZE - 1, grid_pos));
 }
 
