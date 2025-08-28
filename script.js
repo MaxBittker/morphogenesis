@@ -4,17 +4,26 @@ let device = null;
 let context = null;
 let renderPipeline = null;
 let gridRenderPipeline = null;
+let springRenderPipeline = null;
 let vertexBuffer = null;
 let gridVertexBuffer = null;
+let springVertexBuffer = null;
 let instanceBuffer = null;
 let uniformBuffer = null;
 let bindGroup = null;
 let gridBindGroup = null;
+let springBindGroup = null;
 let gridLinesCount = 0;
+let maxSprings = 0;
 let animationId = null;
 let time = 0;
 let updateTimeMs = 0;
 const timingDisplay = document.getElementById("timing-display");
+
+// Pre-allocated reusable buffers to avoid per-frame allocations
+let particlePositionsBuffer = null;
+let springVerticesBuffer = null;
+let aspectRatioBuffer = null;
 
 function log(message) {
   console.log(message);
@@ -150,7 +159,7 @@ async function createRenderPipeline() {
                 }
             `;
 
-  // Grid visualization shaders
+  // Grid visualization shaders - use positions directly like particle positions
   const gridVertexShaderCode = `
                 struct Uniforms {
                     aspect_ratio: f32,
@@ -159,16 +168,8 @@ async function createRenderPipeline() {
                 
                 @vertex
                 fn main(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
-                    var scaled_pos = position;
-                    
-                    // Adjust for aspect ratio
-                    if (uniforms.aspect_ratio > 1.0) {
-                        scaled_pos.x = scaled_pos.x / uniforms.aspect_ratio;
-                    } else {
-                        scaled_pos.y = scaled_pos.y * uniforms.aspect_ratio;
-                    }
-                    
-                    return vec4<f32>(scaled_pos, 0.0, 1.0);
+                    // Use position directly - same as input.particle_pos in particle shader
+                    return vec4<f32>(position, 0.0, 1.0);
                 }
             `;
 
@@ -176,6 +177,27 @@ async function createRenderPipeline() {
                 @fragment
                 fn main() -> @location(0) vec4<f32> {
                     return vec4<f32>(0.2, 0.4, 0.8, 0.15); // Subtle blue grid lines
+                }
+            `;
+
+  // Spring visualization shaders - use positions directly like particle positions
+  const springVertexShaderCode = `
+                struct Uniforms {
+                    aspect_ratio: f32,
+                }
+                @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+                
+                @vertex
+                fn main(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
+                    // Use position directly - same as input.particle_pos in particle shader
+                    return vec4<f32>(position, 0.0, 1.0);
+                }
+            `;
+
+  const springFragmentShaderCode = `
+                @fragment
+                fn main() -> @location(0) vec4<f32> {
+                    return vec4<f32>(0.8, 0.6, 0.2, 0.3); // Orange spring connections
                 }
             `;
 
@@ -193,6 +215,14 @@ async function createRenderPipeline() {
 
   const gridFragmentShaderModule = device.createShaderModule({
     code: gridFragmentShaderCode,
+  });
+
+  const springVertexShaderModule = device.createShaderModule({
+    code: springVertexShaderCode,
+  });
+
+  const springFragmentShaderModule = device.createShaderModule({
+    code: springFragmentShaderCode,
   });
 
   // Base quad vertices (will be instanced) for circle rendering
@@ -222,38 +252,62 @@ async function createRenderPipeline() {
   device.queue.writeBuffer(vertexBuffer, 0, quadVertices);
 
   // Instance buffer for particle positions (will be updated each frame)
-  // Allocate for stress testing - adjust based on PARTICLE_COUNT in main.zig
-  const maxParticles = 6000; // Should be >= PARTICLE_COUNT in main.zig
+  // Enhanced system: 5x 16x16 grids (1280) + 200 free agents = 1480 particles
+  const maxParticles = 2000; // Should be >= PARTICLE_COUNT in main.zig (1480)
   instanceBuffer = device.createBuffer({
     size: maxParticles * 2 * 4, // 2 floats per particle (x, y)
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
   log(`Created instance buffer for up to ${maxParticles} particles`);
 
-  // Create grid lines for 25x25 spatial grid
+  // Create grid lines for 25x25 spatial grid - match Zig WORLD_SIZE exactly
   const gridSize = 25;
-  const worldSize = 1.95;
-  const gridLines = [];
+  const worldSize = 1.95; // Must match WORLD_SIZE in main.zig
+  const worldHalf = worldSize / 2.0;
+  const totalGridLines = (gridSize + 1) * 2; // Vertical + horizontal lines
+  const gridLinesArray = new Float32Array(totalGridLines * 4); // 4 floats per line
+  let gridIndex = 0;
   
-  // Vertical lines
+  // Vertical lines - properly bounded to world coordinates
   for (let i = 0; i <= gridSize; i++) {
-    const x = (i / gridSize) * worldSize - worldSize / 2;
-    gridLines.push(x, -worldSize / 2, x, worldSize / 2);
+    const x = (i / gridSize) * worldSize - worldHalf;
+    gridLinesArray[gridIndex++] = x;
+    gridLinesArray[gridIndex++] = -worldHalf;
+    gridLinesArray[gridIndex++] = x;
+    gridLinesArray[gridIndex++] = worldHalf;
   }
   
-  // Horizontal lines  
+  // Horizontal lines - properly bounded to world coordinates
   for (let i = 0; i <= gridSize; i++) {
-    const y = (i / gridSize) * worldSize - worldSize / 2;
-    gridLines.push(-worldSize / 2, y, worldSize / 2, y);
+    const y = (i / gridSize) * worldSize - worldHalf;
+    gridLinesArray[gridIndex++] = -worldHalf;
+    gridLinesArray[gridIndex++] = y;
+    gridLinesArray[gridIndex++] = worldHalf;
+    gridLinesArray[gridIndex++] = y;
   }
   
   gridVertexBuffer = device.createBuffer({
-    size: gridLines.length * 4,
+    size: gridLinesArray.byteLength,
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
   
-  device.queue.writeBuffer(gridVertexBuffer, 0, new Float32Array(gridLines));
-  gridLinesCount = gridLines.length / 2; // Each line has 2 vertices
+  device.queue.writeBuffer(gridVertexBuffer, 0, gridLinesArray);
+  gridLinesCount = totalGridLines; // Each line has 2 vertices
+
+  // Create spring vertex buffer
+  // 5 grids × 16×16 particles = 1280 particles
+  // Each grid: (16-1)×16 horizontal + 16×(16-1) vertical = 15×16 + 16×15 = 240 + 240 = 480 springs
+  // Total: 5 × 480 = 2400 springs
+  maxSprings = 2400;
+  springVertexBuffer = device.createBuffer({
+    size: maxSprings * 4 * 4, // 4 floats per spring (2 vertices × 2 coordinates)
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+
+  // Pre-allocate reusable TypedArray buffers
+  particlePositionsBuffer = new Float32Array(maxParticles * 2);
+  springVerticesBuffer = new Float32Array(maxSprings * 4);
+  aspectRatioBuffer = new Float32Array(1);
 
   // Uniform buffer for aspect ratio
   uniformBuffer = device.createBuffer({
@@ -399,7 +453,65 @@ async function createRenderPipeline() {
     ],
   });
 
-  log("Particle and grid render pipelines created");
+  // Create spring render pipeline
+  springRenderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({
+      bindGroupLayouts: [bindGroupLayout],
+    }),
+    vertex: {
+      module: springVertexShaderModule,
+      entryPoint: "main",
+      buffers: [
+        {
+          arrayStride: 2 * 4, // 2 floats per vertex
+          stepMode: "vertex",
+          attributes: [
+            {
+              format: "float32x2",
+              offset: 0,
+              shaderLocation: 0,
+            },
+          ],
+        },
+      ],
+    },
+    fragment: {
+      module: springFragmentShaderModule,
+      entryPoint: "main",
+      targets: [
+        {
+          format: navigator.gpu.getPreferredCanvasFormat(),
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
+      ],
+    },
+    primitive: {
+      topology: "line-list",
+    },
+  });
+
+  springBindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      {
+        binding: 0,
+        resource: { buffer: uniformBuffer },
+      },
+    ],
+  });
+
+  log("Particle, grid, and spring render pipelines created");
 }
 
 // Load and instantiate WASM module
@@ -453,13 +565,10 @@ function renderFrame() {
 
   time += 0.016; // ~60fps timing
 
-  // Update aspect ratio uniform
+  // Update aspect ratio uniform using pre-allocated buffer
   const aspectRatio = window.aspectRatio || canvas.width / canvas.height;
-  device.queue.writeBuffer(
-    uniformBuffer,
-    0,
-    new Float32Array([aspectRatio])
-  );
+  aspectRatioBuffer[0] = aspectRatio;
+  device.queue.writeBuffer(uniformBuffer, 0, aspectRatioBuffer);
 
   // Time the particle update loop
   const updateStart = performance.now();
@@ -470,21 +579,41 @@ function renderFrame() {
   // Update timing display
   timingDisplay.textContent = `Update: ${updateTimeMs}ms`;
 
-  // Get particle data from WASM
+  // Get particle data from WASM using pre-allocated buffer
   const particleCount = wasmModule.exports.get_particle_count();
-  const particlePositions = new Float32Array(particleCount * 2);
 
   for (let i = 0; i < particleCount; i++) {
-    particlePositions[i * 2] = wasmModule.exports.get_particle_data(
-      i * 2
-    ); // x
-    particlePositions[i * 2 + 1] = wasmModule.exports.get_particle_data(
-      i * 2 + 1
-    ); // y
+    particlePositionsBuffer[i * 2] = wasmModule.exports.get_particle_data(i * 2); // x
+    particlePositionsBuffer[i * 2 + 1] = wasmModule.exports.get_particle_data(i * 2 + 1); // y
   }
 
-  // Update instance buffer with particle positions
-  device.queue.writeBuffer(instanceBuffer, 0, particlePositions);
+  // Update instance buffer with particle positions (only the used portion)
+  device.queue.writeBuffer(instanceBuffer, 0, particlePositionsBuffer, 0, particleCount * 2);
+
+  // Get spring data and update spring vertex buffer using pre-allocated buffer
+  const springCount = wasmModule.exports.get_spring_count ? wasmModule.exports.get_spring_count() : 0;
+  if (springCount > 0) {
+    for (let i = 0; i < springCount; i++) {
+      // Get spring connection indices
+      const particleA = wasmModule.exports.get_spring_particle_a ? wasmModule.exports.get_spring_particle_a(i) : 0;
+      const particleB = wasmModule.exports.get_spring_particle_b ? wasmModule.exports.get_spring_particle_b(i) : 0;
+      
+      // Get positions of connected particles (reuse already fetched particle data)
+      const ax = particlePositionsBuffer[particleA * 2];
+      const ay = particlePositionsBuffer[particleA * 2 + 1];
+      const bx = particlePositionsBuffer[particleB * 2];
+      const by = particlePositionsBuffer[particleB * 2 + 1];
+      
+      // Store spring as line (vertex A, vertex B)
+      springVerticesBuffer[i * 4] = ax;
+      springVerticesBuffer[i * 4 + 1] = ay;
+      springVerticesBuffer[i * 4 + 2] = bx;
+      springVerticesBuffer[i * 4 + 3] = by;
+    }
+    
+    // Update buffer with only the used portion
+    device.queue.writeBuffer(springVertexBuffer, 0, springVerticesBuffer, 0, springCount * 4);
+  }
 
   try {
     const commandEncoder = device.createCommandEncoder();
@@ -509,6 +638,15 @@ function renderFrame() {
     passEncoder.setBindGroup(0, gridBindGroup);
     passEncoder.setVertexBuffer(0, gridVertexBuffer);
     passEncoder.draw(gridLinesCount, 1, 0, 0); // Draw all grid lines
+    
+    // Draw spring connections
+    const springCount = wasmModule.exports.get_spring_count ? wasmModule.exports.get_spring_count() : 0;
+    if (springCount > 0) {
+      passEncoder.setPipeline(springRenderPipeline);
+      passEncoder.setBindGroup(0, springBindGroup);
+      passEncoder.setVertexBuffer(0, springVertexBuffer);
+      passEncoder.draw(springCount * 2, 1, 0, 0); // 2 vertices per spring line
+    }
     
     // Draw particles on top
     passEncoder.setPipeline(renderPipeline);

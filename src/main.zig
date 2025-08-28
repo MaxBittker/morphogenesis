@@ -1,8 +1,13 @@
 const std = @import("std");
 const math = std.math;
 
-// Boids simulation parameters - adjust this for stress testing
-const PARTICLE_COUNT = 2500; // Hue-based flocking with color affinity calculations
+// Enhanced particle system: grids + free agents
+const GRID_COUNT = 5; // Number of 16x16 spring-connected grids
+const GRID_PARTICLE_SIZE = 16; // 16x16 particles per grid
+const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE; // 256 particles per grid
+const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID; // 1280 grid particles
+const FREE_AGENT_COUNT = 200; // Free-roaming Boids
+const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT; // 3280 total
 const MAX_SPEED = 0.2;
 const MAX_FORCE = 0.3;
 const SEPARATION_RADIUS = 0.016;
@@ -12,8 +17,14 @@ const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspe
 
 // Force strength multipliers
 const SEPARATION_STRENGTH = 20.0;
-const ALIGNMENT_STRENGTH = 1.5;
-const COHESION_STRENGTH = 1.5;
+const ALIGNMENT_STRENGTH = 0.0;
+const COHESION_STRENGTH = 0.0;
+
+// Spring system parameters
+const SPRING_REST_LENGTH = 0.02; // Natural spring length between connected particles
+const SPRING_STRENGTH = 100.15; // Spring force coefficient
+const SPRING_DAMPING = 0.95; // Velocity damping for stability
+const GRID_SPACING = 0.01; // Base spacing between grid particles
 
 // Spatial partitioning grid for O(n) performance
 const GRID_SIZE = 25; // 25x25 grid
@@ -24,21 +35,48 @@ const MAX_PARTICLES_PER_CELL = 500;
 const GRID_SCALE = @as(f32, GRID_SIZE) / WORLD_SIZE;
 const WORLD_HALF = WORLD_SIZE / 2.0;
 
-// Particle structure for Boids
+// Spring connection structure
+const Spring = struct {
+    particle_a: u32, // Index of first connected particle
+    particle_b: u32, // Index of second connected particle
+    rest_length: f32, // Natural length of spring
+
+    const Self = @This();
+
+    pub fn init(a: u32, b: u32, length: f32) Self {
+        return Self{
+            .particle_a = a,
+            .particle_b = b,
+            .rest_length = length,
+        };
+    }
+};
+
+// Particle type enumeration
+const ParticleType = enum {
+    grid_particle, // Part of a spring-connected grid
+    free_agent, // Independent Boid
+};
+
+// Particle structure for Boids with spring support
 const Particle = struct {
     x: f32,
     y: f32,
     vx: f32,
     vy: f32,
+    particle_type: ParticleType,
+    grid_id: u8, // Which grid this particle belongs to (0-4, or 255 for free agents)
 
     const Self = @This();
 
-    pub fn init(x: f32, y: f32) Self {
+    pub fn init(x: f32, y: f32, ptype: ParticleType, grid: u8) Self {
         return Self{
             .x = x,
             .y = y,
             .vx = (x * 0.1), // Simple deterministic initial velocity
             .vy = (y * 0.1),
+            .particle_type = ptype,
+            .grid_id = grid,
         };
     }
 
@@ -162,9 +200,20 @@ const Particle = struct {
             }
         }
 
-        // Apply forces
+        // Apply Boids forces
         self.vx += force_x * dt;
         self.vy += force_y * dt;
+
+        // Apply spring forces and damping if this is a grid particle
+        if (self.particle_type == ParticleType.grid_particle) {
+            const spring_force = self.calculateSpringForces(particle_index);
+            self.vx += spring_force.x * dt;
+            self.vy += spring_force.y * dt;
+
+            // Apply damping to grid particles for stability
+            self.vx *= SPRING_DAMPING;
+            self.vy *= SPRING_DAMPING;
+        }
 
         // Limit speed
         const speed_sq = self.vx * self.vx + self.vy * self.vy;
@@ -199,6 +248,43 @@ const Particle = struct {
             self.y = -border;
             self.vy = @abs(self.vy) * bounce_force;
         }
+    }
+
+    // Calculate spring forces acting on this particle using optimized lookup
+    fn calculateSpringForces(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
+        var total_force_x: f32 = 0;
+        var total_force_y: f32 = 0;
+
+        // Use connection lookup table instead of iterating all springs
+        const connection_count = particle_connection_counts[particle_index];
+
+        for (0..connection_count) |i| {
+            const spring_index = particle_connections[particle_index][i];
+            const spring = &springs[spring_index];
+
+            // Determine which particle is the other end of the spring
+            const other_index = if (spring.particle_a == particle_index) spring.particle_b else spring.particle_a;
+            const other = &particles[other_index];
+
+            const dx = other.x - self.x;
+            const dy = other.y - self.y;
+            const distance = @sqrt(dx * dx + dy * dy);
+
+            if (distance > 0) {
+                // Spring force: F = k * (distance - rest_length)
+                const displacement = distance - spring.rest_length;
+                const force_magnitude = SPRING_STRENGTH * displacement;
+
+                // Normalize direction and apply force
+                const norm_x = dx / distance;
+                const norm_y = dy / distance;
+
+                total_force_x += force_magnitude * norm_x;
+                total_force_y += force_magnitude * norm_y;
+            }
+        }
+
+        return .{ .x = total_force_x, .y = total_force_y };
     }
 
     fn separate(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
@@ -504,6 +590,17 @@ var grid_initialized = false;
 var particles: [PARTICLE_COUNT]Particle = undefined;
 var particles_initialized = false;
 
+// Spring system - maximum springs for 5 16x16 grids with 4-connectivity
+const MAX_SPRINGS = GRID_COUNT * (GRID_PARTICLE_SIZE - 1) * GRID_PARTICLE_SIZE * 2; // Horizontal + vertical springs
+var springs: [MAX_SPRINGS]Spring = undefined;
+var spring_count: u32 = 0;
+var springs_initialized = false;
+
+// Connection lookup optimization: store spring indices for each particle
+const MAX_CONNECTIONS_PER_PARTICLE = 4; // Maximum 4 springs per grid particle (up, down, left, right)
+var particle_connections: [PARTICLE_COUNT][MAX_CONNECTIONS_PER_PARTICLE]u32 = undefined;
+var particle_connection_counts: [PARTICLE_COUNT]u8 = undefined;
+
 // Mock WebGPU bindings (not actually used for rendering)
 extern fn emscripten_webgpu_get_device() u32;
 
@@ -581,8 +678,107 @@ fn populateGrid() void {
 
 var device_handle: u32 = 0;
 
+// Initialize grid particles in 5 separate 16x16 grids
+fn initializeGridParticles() void {
+    // Grid positions in world space (spread them out)
+    const grid_positions = [_][2]f32{
+        .{ -0.6, -0.6 }, // Top-left
+        .{ 0.6, -0.6 }, // Top-right
+        .{ 0.0, 0.0 }, // Center
+        .{ -0.6, 0.6 }, // Bottom-left
+        .{ 0.6, 0.6 }, // Bottom-right
+    };
+
+    var particle_index: u32 = 0;
+
+    for (0..GRID_COUNT) |grid_id| {
+        const base_x = grid_positions[grid_id][0];
+        const base_y = grid_positions[grid_id][1];
+
+        // Create 16x16 grid of particles
+        for (0..GRID_PARTICLE_SIZE) |row| {
+            for (0..GRID_PARTICLE_SIZE) |col| {
+                const x = base_x + (@as(f32, @floatFromInt(col)) - 7.5) * GRID_SPACING;
+                const y = base_y + (@as(f32, @floatFromInt(row)) - 7.5) * GRID_SPACING;
+
+                particles[particle_index] = Particle.init(x, y, ParticleType.grid_particle, @intCast(grid_id));
+                particle_index += 1;
+            }
+        }
+    }
+}
+
+// Initialize free agent Boids with random positions
+fn initializeFreeAgents() void {
+    const start_index = TOTAL_GRID_PARTICLES;
+
+    for (start_index..PARTICLE_COUNT) |i| {
+        const seed = @as(f32, @floatFromInt(i));
+        const range = WORLD_SIZE * 0.8;
+        const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range;
+        const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range;
+
+        particles[i] = Particle.init(x, y, ParticleType.free_agent, 255);
+    }
+}
+
+// Create spring connections within each 16x16 grid
+fn initializeSprings() void {
+    spring_count = 0;
+
+    // Initialize connection lookup table
+    for (0..PARTICLE_COUNT) |i| {
+        particle_connection_counts[i] = 0;
+    }
+
+    for (0..GRID_COUNT) |grid_id| {
+        const grid_start = grid_id * PARTICLES_PER_GRID;
+
+        // Create horizontal springs (connect adjacent particles in same row)
+        for (0..GRID_PARTICLE_SIZE) |row| {
+            for (0..GRID_PARTICLE_SIZE - 1) |col| {
+                const particle_a = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col));
+                const particle_b = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col + 1));
+
+                springs[spring_count] = Spring.init(particle_a, particle_b, SPRING_REST_LENGTH);
+
+                // Update connection lookup for both particles
+                addParticleConnection(particle_a, spring_count);
+                addParticleConnection(particle_b, spring_count);
+
+                spring_count += 1;
+            }
+        }
+
+        // Create vertical springs (connect adjacent particles in same column)
+        for (0..GRID_PARTICLE_SIZE - 1) |row| {
+            for (0..GRID_PARTICLE_SIZE) |col| {
+                const particle_a = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col));
+                const particle_b = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col));
+
+                springs[spring_count] = Spring.init(particle_a, particle_b, SPRING_REST_LENGTH);
+
+                // Update connection lookup for both particles
+                addParticleConnection(particle_a, spring_count);
+                addParticleConnection(particle_b, spring_count);
+
+                spring_count += 1;
+            }
+        }
+    }
+}
+
+// Helper function to add a spring connection to a particle's lookup table
+fn addParticleConnection(particle_index: u32, spring_index: u32) void {
+    const count = particle_connection_counts[particle_index];
+    if (count < MAX_CONNECTIONS_PER_PARTICLE) {
+        particle_connections[particle_index][count] = spring_index;
+        particle_connection_counts[particle_index] += 1;
+    }
+}
+
 export fn init() void {
-    log("Initializing Boids particle system with spatial partitioning...", .{});
+    log("Initializing enhanced particle system: {} grids + {} free agents...", .{ GRID_COUNT, FREE_AGENT_COUNT });
     device_handle = emscripten_webgpu_get_device();
     log("WebGPU device initialized: {}", .{device_handle});
 
@@ -591,17 +787,17 @@ export fn init() void {
 
     // Initialize particles
     if (!particles_initialized) {
-        for (&particles, 0..) |*particle, i| {
-            // More random distribution using simple pseudo-random
-            const seed = @as(f32, @floatFromInt(i));
-            const range = WORLD_SIZE * 0.8; // Use 80% of world size for initial spread
-            const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range;
-            const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range;
-
-            particle.* = Particle.init(x, y);
-        }
+        initializeGridParticles();
+        initializeFreeAgents();
         particles_initialized = true;
-        log("Initialized {} particles with {}x{} spatial grid", .{ PARTICLE_COUNT, GRID_SIZE, GRID_SIZE });
+        log("Initialized {} total particles: {} grid + {} free agents", .{ PARTICLE_COUNT, TOTAL_GRID_PARTICLES, FREE_AGENT_COUNT });
+    }
+
+    // Initialize spring connections
+    if (!springs_initialized) {
+        initializeSprings();
+        springs_initialized = true;
+        log("Created {} spring connections for {} grids", .{ spring_count, GRID_COUNT });
     }
 }
 
@@ -620,6 +816,24 @@ export fn update_particles(dt: f32) void {
 
 export fn get_particle_count() i32 {
     return PARTICLE_COUNT;
+}
+
+export fn get_spring_count() i32 {
+    return @intCast(spring_count);
+}
+
+export fn get_spring_particle_a(spring_index: i32) i32 {
+    if (spring_index < 0 or spring_index >= spring_count) {
+        return 0;
+    }
+    return @intCast(springs[@intCast(spring_index)].particle_a);
+}
+
+export fn get_spring_particle_b(spring_index: i32) i32 {
+    if (spring_index < 0 or spring_index >= spring_count) {
+        return 0;
+    }
+    return @intCast(springs[@intCast(spring_index)].particle_b);
 }
 
 export fn get_particle_data(index: i32) f32 {
