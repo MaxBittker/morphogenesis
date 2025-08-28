@@ -818,6 +818,23 @@ export fn get_particle_count() i32 {
     return PARTICLE_COUNT;
 }
 
+// Export important constants to avoid duplication in JavaScript
+export fn get_world_size() f32 {
+    return WORLD_SIZE;
+}
+
+export fn get_grid_size() i32 {
+    return GRID_SIZE;
+}
+
+export fn get_max_particles() i32 {
+    return PARTICLE_COUNT + 1000; // Buffer for safety
+}
+
+export fn get_max_springs() i32 {
+    return MAX_SPRINGS;
+}
+
 export fn get_spring_count() i32 {
     return @intCast(spring_count);
 }
