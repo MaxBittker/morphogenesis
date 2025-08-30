@@ -1,0 +1,13 @@
+{
+  "name": "morphogenesis",
+  "version": "1.0.0",
+  "description": "Boids simulation with WebGPU",
+  "scripts": {
+    "dev": "node dev-server.js",
+    "build": "./build.sh"
+  },
+  "devDependencies": {
+    "chokidar": "^3.5.3",
+    "ws": "^8.14.2"
+  }
+}
