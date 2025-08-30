@@ -6,6 +6,11 @@ let time = 0;
 let updateTimeMs = 0;
 const timingDisplay = document.getElementById("timing-display");
 
+// Mouse interaction state
+let mousePressed = false;
+let mouseX = 0;
+let mouseY = 0;
+
 function log(message) {
   console.log(message);
 }
@@ -23,6 +28,61 @@ function resizeCanvas() {
 
 window.addEventListener("resize", resizeCanvas);
 resizeCanvas();
+
+// Convert mouse screen coordinates to world coordinates
+function screenToWorld(screenX, screenY) {
+  const rect = canvas.getBoundingClientRect();
+  
+  // Convert to canvas coordinates (0 to canvas size)
+  const canvasX = (screenX - rect.left) * (canvas.width / rect.width);
+  const canvasY = (screenY - rect.top) * (canvas.height / rect.height);
+  
+  // Convert to normalized device coordinates (-1 to 1)
+  const ndcX = (canvasX / canvas.width) * 2 - 1;
+  const ndcY = -((canvasY / canvas.height) * 2 - 1); // Flip Y axis
+  
+  // Convert to world coordinates - simple direct mapping
+  const worldSize = wasmModule ? wasmModule.exports.get_world_size() : 1.95;
+  const worldX = ndcX * (worldSize / 2);
+  const worldY = ndcY * (worldSize / 2);
+  
+  return { x: worldX, y: worldY };
+}
+
+// Mouse event handlers
+canvas.addEventListener('pointerdown', (event) => {
+  if (!wasmModule) return;
+  
+  mousePressed = true;
+  const worldPos = screenToWorld(event.clientX, event.clientY);
+  mouseX = worldPos.x;
+  mouseY = worldPos.y;
+  
+  // Tell WASM about mouse press
+  wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+});
+
+canvas.addEventListener('pointermove', (event) => {
+  if (!wasmModule) return;
+  
+  const worldPos = screenToWorld(event.clientX, event.clientY);
+  mouseX = worldPos.x;
+  mouseY = worldPos.y;
+  
+  // Update mouse position in WASM if pressed
+  if (mousePressed) {
+    wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+  }
+});
+
+canvas.addEventListener('pointerup', (event) => {
+  if (!wasmModule) return;
+  
+  mousePressed = false;
+  
+  // Tell WASM about mouse release
+  wasmModule.exports.set_mouse_interaction(mouseX, mouseY, false);
+});
 
 async function initRenderer() {
   // Create and initialize the renderer

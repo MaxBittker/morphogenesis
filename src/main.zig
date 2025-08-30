@@ -3,7 +3,7 @@ const math = std.math;
 
 // Enhanced particle system: grids + free agents
 const GRID_COUNT = 5; // Number of 16x16 spring-connected grids
-const GRID_PARTICLE_SIZE = 16; // 16x16 particles per grid
+const GRID_PARTICLE_SIZE = 10; // 16x16 particles per grid
 const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE; // 256 particles per grid
 const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID; // 1280 grid particles
 const FREE_AGENT_COUNT = 200; // Free-roaming Boids
@@ -210,18 +210,39 @@ const Particle = struct {
             self.vx += spring_force.x * dt;
             self.vy += spring_force.y * dt;
 
-            // Apply damping to grid particles for stability
-            self.vx *= SPRING_DAMPING;
-            self.vy *= SPRING_DAMPING;
+            // Apply damping to grid particles for stability (less damping for mouse-connected particles)
+            if (mouse_has_connection and particle_index == mouse_connected_particle) {
+                self.vx *= 0.98; // Much less damping for mouse-connected particles
+                self.vy *= 0.98;
+            } else {
+                self.vx *= SPRING_DAMPING;
+                self.vy *= SPRING_DAMPING;
+            }
         }
 
-        // Limit speed
+        // Apply mouse spring force if this particle is connected to mouse
+        const mouse_force = applyMouseSpringForce(particle_index);
+        self.vx += mouse_force.x * dt;
+        self.vy += mouse_force.y * dt;
+
+        // Limit speed (allow higher speed for mouse-connected particles)
         const speed_sq = self.vx * self.vx + self.vy * self.vy;
-        const max_speed_sq = MAX_SPEED * MAX_SPEED;
-        if (speed_sq > max_speed_sq) {
-            const speed = @sqrt(speed_sq);
-            self.vx = (self.vx / speed) * MAX_SPEED;
-            self.vy = (self.vy / speed) * MAX_SPEED;
+        if (mouse_has_connection and particle_index == mouse_connected_particle) {
+            // 5x higher speed limit for mouse-connected particles
+            const mouse_max_speed = MAX_SPEED * 5.0;
+            const mouse_max_speed_sq = mouse_max_speed * mouse_max_speed;
+            if (speed_sq > mouse_max_speed_sq) {
+                const speed = @sqrt(speed_sq);
+                self.vx = (self.vx / speed) * mouse_max_speed;
+                self.vy = (self.vy / speed) * mouse_max_speed;
+            }
+        } else {
+            const max_speed_sq = MAX_SPEED * MAX_SPEED;
+            if (speed_sq > max_speed_sq) {
+                const speed = @sqrt(speed_sq);
+                self.vx = (self.vx / speed) * MAX_SPEED;
+                self.vy = (self.vy / speed) * MAX_SPEED;
+            }
         }
 
         // Update position
@@ -601,6 +622,13 @@ const MAX_CONNECTIONS_PER_PARTICLE = 4; // Maximum 4 springs per grid particle (
 var particle_connections: [PARTICLE_COUNT][MAX_CONNECTIONS_PER_PARTICLE]u32 = undefined;
 var particle_connection_counts: [PARTICLE_COUNT]u8 = undefined;
 
+// Mouse interaction state
+var mouse_x: f32 = 0.0;
+var mouse_y: f32 = 0.0;
+var mouse_pressed: bool = false;
+var mouse_connected_particle: u32 = 0;
+var mouse_has_connection: bool = false;
+
 // Mock WebGPU bindings (not actually used for rendering)
 extern fn emscripten_webgpu_get_device() u32;
 
@@ -777,6 +805,53 @@ fn addParticleConnection(particle_index: u32, spring_index: u32) void {
     }
 }
 
+// Find the closest particle to a given position
+fn findClosestParticle(target_x: f32, target_y: f32) u32 {
+    var closest_index: u32 = 0;
+    var closest_distance_sq: f32 = std.math.inf(f32);
+
+    for (0..PARTICLE_COUNT) |i| {
+        const particle = &particles[i];
+        const dx = target_x - particle.x;
+        const dy = target_y - particle.y;
+        const distance_sq = dx * dx + dy * dy;
+
+        if (distance_sq < closest_distance_sq) {
+            closest_distance_sq = distance_sq;
+            closest_index = @intCast(i);
+        }
+    }
+
+    return closest_index;
+}
+
+// Apply mouse spring force to the connected particle
+fn applyMouseSpringForce(particle_index: u32) struct { x: f32, y: f32 } {
+    if (!mouse_has_connection or particle_index != mouse_connected_particle) {
+        return .{ .x = 0.0, .y = 0.0 };
+    }
+
+    const particle = &particles[particle_index];
+    const dx = mouse_x - particle.x;
+    const dy = mouse_y - particle.y;
+    const distance = @sqrt(dx * dx + dy * dy);
+
+    if (distance > 0) {
+        const mouse_spring_strength = SPRING_STRENGTH * 500.0; // Extremely strong - 500x regular springs
+        const mouse_spring_rest_length: f32 = 0.0; // Pull directly to mouse
+
+        const displacement = distance - mouse_spring_rest_length;
+        const force_magnitude = mouse_spring_strength * displacement;
+
+        const norm_x = dx / distance;
+        const norm_y = dy / distance;
+
+        return .{ .x = force_magnitude * norm_x, .y = force_magnitude * norm_y };
+    }
+
+    return .{ .x = 0.0, .y = 0.0 };
+}
+
 export fn init() void {
     log("Initializing enhanced particle system: {} grids + {} free agents...", .{ GRID_COUNT, FREE_AGENT_COUNT });
     device_handle = emscripten_webgpu_get_device();
@@ -866,6 +941,41 @@ export fn get_particle_data(index: i32) f32 {
     } else {
         return particles[particle_index].y;
     }
+}
+
+// Mouse interaction functions
+export fn set_mouse_interaction(x: f32, y: f32, pressed: bool) void {
+    mouse_x = x;
+    mouse_y = y;
+
+    if (pressed and !mouse_pressed) {
+        // Mouse just pressed - find closest particle and create connection
+        mouse_pressed = true;
+        mouse_connected_particle = findClosestParticle(x, y);
+        mouse_has_connection = true;
+    } else if (!pressed and mouse_pressed) {
+        // Mouse just released - remove connection
+        mouse_pressed = false;
+        mouse_has_connection = false;
+    } else if (pressed and mouse_pressed) {
+        // Mouse still pressed - update position only
+        mouse_pressed = true;
+    }
+}
+
+export fn get_mouse_connected_particle() i32 {
+    if (mouse_has_connection) {
+        return @intCast(mouse_connected_particle);
+    }
+    return -1;
+}
+
+export fn get_mouse_position_x() f32 {
+    return mouse_x;
+}
+
+export fn get_mouse_position_y() f32 {
+    return mouse_y;
 }
 
 // Test functions for debugging

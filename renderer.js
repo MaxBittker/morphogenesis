@@ -11,11 +11,13 @@ class MorphogenesisRenderer {
     this.renderPipeline = null;
     this.gridRenderPipeline = null;
     this.springRenderPipeline = null;
+    this.mouseSpringRenderPipeline = null;
     
     // Buffers
     this.vertexBuffer = null;
     this.gridVertexBuffer = null;
     this.springVertexBuffer = null;
+    this.mouseSpringVertexBuffer = null;
     this.instanceBuffer = null;
     this.uniformBuffer = null;
     
@@ -23,6 +25,7 @@ class MorphogenesisRenderer {
     this.bindGroup = null;
     this.gridBindGroup = null;
     this.springBindGroup = null;
+    this.mouseSpringBindGroup = null;
     
     // Rendering state
     this.gridLinesCount = 0;
@@ -198,13 +201,22 @@ class MorphogenesisRenderer {
       }
     `;
 
+    // Mouse spring visualization shader (bright, prominent color)
+    const mouseSpringFragmentShaderCode = `
+      @fragment
+      fn main() -> @location(0) vec4<f32> {
+          return vec4<f32>(1.0, 0.2, 0.2, 0.8); // Bright red, more opaque
+      }
+    `;
+
     return {
       particleVertex: particleVertexShaderCode,
       particleFragment: particleFragmentShaderCode,
       gridVertex: gridVertexShaderCode,
       gridFragment: gridFragmentShaderCode,
       springVertex: springVertexShaderCode,
-      springFragment: springFragmentShaderCode
+      springFragment: springFragmentShaderCode,
+      mouseSpringFragment: mouseSpringFragmentShaderCode
     };
   }
 
@@ -218,6 +230,7 @@ class MorphogenesisRenderer {
     const gridFragmentModule = this.device.createShaderModule({ code: shaders.gridFragment });
     const springVertexModule = this.device.createShaderModule({ code: shaders.springVertex });
     const springFragmentModule = this.device.createShaderModule({ code: shaders.springFragment });
+    const mouseSpringFragmentModule = this.device.createShaderModule({ code: shaders.mouseSpringFragment });
 
     // Create bind group layout
     const bindGroupLayout = this.device.createBindGroupLayout({
@@ -313,6 +326,32 @@ class MorphogenesisRenderer {
       primitive: { topology: "line-list" },
     });
 
+    // Create mouse spring render pipeline (same as spring but with different color)
+    this.mouseSpringRenderPipeline = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+      vertex: {
+        module: springVertexModule,
+        entryPoint: "main",
+        buffers: [{
+          arrayStride: 2 * 4,
+          stepMode: "vertex", 
+          attributes: [{ format: "float32x2", offset: 0, shaderLocation: 0 }],
+        }],
+      },
+      fragment: {
+        module: mouseSpringFragmentModule,
+        entryPoint: "main",
+        targets: [{
+          format: navigator.gpu.getPreferredCanvasFormat(),
+          blend: {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+          },
+        }],
+      },
+      primitive: { topology: "line-list" },
+    });
+
     this.log("Render pipelines created successfully");
     return bindGroupLayout;
   }
@@ -373,6 +412,12 @@ class MorphogenesisRenderer {
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
 
+    // Mouse spring vertex buffer (for single mouse connection)
+    this.mouseSpringVertexBuffer = this.device.createBuffer({
+      size: 4 * 4, // One line (2 vertices * 2 coordinates * 4 bytes)
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+
     // Uniform buffer for aspect ratio
     this.uniformBuffer = this.device.createBuffer({
       size: 4,
@@ -395,9 +440,15 @@ class MorphogenesisRenderer {
       entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
     });
 
+    this.mouseSpringBindGroup = this.device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
+    });
+
     // Pre-allocate reusable TypedArray buffers
     this.particlePositionsBuffer = new Float32Array(this.maxParticles * 2);
     this.springVerticesBuffer = new Float32Array(this.maxSprings * 4);
+    this.mouseSpringVerticesBuffer = new Float32Array(4); // One line: x1, y1, x2, y2
     this.aspectRatioBuffer = new Float32Array(1);
 
     this.log("Buffers created successfully");
@@ -462,11 +513,34 @@ class MorphogenesisRenderer {
       this.device.queue.writeBuffer(this.springVertexBuffer, 0, this.springVerticesBuffer, 0, springCount * 4);
     }
 
-    return { particleCount, springCount };
+    // Get mouse spring data if exists
+    let hasMouseSpring = false;
+    if (wasmModule.exports.get_mouse_connected_particle) {
+      const mouseParticle = wasmModule.exports.get_mouse_connected_particle();
+      if (mouseParticle >= 0) {
+        const mouseX = wasmModule.exports.get_mouse_position_x();
+        const mouseY = wasmModule.exports.get_mouse_position_y();
+        
+        // Get connected particle position
+        const particleX = this.particlePositionsBuffer[mouseParticle * 2];
+        const particleY = this.particlePositionsBuffer[mouseParticle * 2 + 1];
+        
+        // Create mouse spring line
+        this.mouseSpringVerticesBuffer[0] = particleX;
+        this.mouseSpringVerticesBuffer[1] = particleY;
+        this.mouseSpringVerticesBuffer[2] = mouseX;
+        this.mouseSpringVerticesBuffer[3] = mouseY;
+        
+        this.device.queue.writeBuffer(this.mouseSpringVertexBuffer, 0, this.mouseSpringVerticesBuffer);
+        hasMouseSpring = true;
+      }
+    }
+
+    return { particleCount, springCount, hasMouseSpring };
   }
 
   render(wasmModule) {
-    const { particleCount, springCount } = this.updateData(wasmModule);
+    const { particleCount, springCount, hasMouseSpring } = this.updateData(wasmModule);
 
     try {
       const commandEncoder = this.device.createCommandEncoder();
@@ -495,6 +569,14 @@ class MorphogenesisRenderer {
         passEncoder.setBindGroup(0, this.springBindGroup);
         passEncoder.setVertexBuffer(0, this.springVertexBuffer);
         passEncoder.draw(springCount * 2, 1, 0, 0);
+      }
+      
+      // Draw mouse spring connection (on top of regular springs)
+      if (hasMouseSpring) {
+        passEncoder.setPipeline(this.mouseSpringRenderPipeline);
+        passEncoder.setBindGroup(0, this.mouseSpringBindGroup);
+        passEncoder.setVertexBuffer(0, this.mouseSpringVertexBuffer);
+        passEncoder.draw(2, 1, 0, 0); // One line = 2 vertices
       }
       
       // Draw particles
