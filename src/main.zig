@@ -3,31 +3,37 @@ const math = std.math;
 
 // Enhanced particle system: grids + free agents
 const GRID_COUNT = 5;
-const GRID_PARTICLE_SIZE = 10;
+const GRID_PARTICLE_SIZE = 3;
 const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
 const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID;
-const FREE_AGENT_COUNT = 200;
+const FREE_AGENT_COUNT = 500;
 const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
 
 // Particle physical properties
-const PARTICLE_SIZE = 0.008; // Physical radius of particles
+const PARTICLE_SIZE = 0.02; // Physical radius of particles
+const PARTICLE_MASS = 1.0; // Normalized particle mass
 const MAX_SPEED = 0.2;
 
 // Boids behavior radii (based on particle size for physical accuracy)
 const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5;
-const ALIGNMENT_RADIUS = 0.15;
-const COHESION_RADIUS = 0.25;
+const ALIGNMENT_RADIUS = PARTICLE_SIZE * 3;
+const COHESION_RADIUS = PARTICLE_SIZE * 5;
 const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
 
 // Force strength multipliers
-const SEPARATION_STRENGTH = 10.0;
-const ALIGNMENT_STRENGTH = 0.0;
-const COHESION_STRENGTH = 0.0;
+const force_multiplier = 0.1;
+const SEPARATION_STRENGTH = force_multiplier * 10;
+const ALIGNMENT_STRENGTH = force_multiplier * 0;
+const COHESION_STRENGTH = force_multiplier * 0.5;
+const SPRING_STRENGTH = force_multiplier * 5.0;
 
 // Spring system parameters
-const SPRING_REST_LENGTH = PARTICLE_SIZE * 2; // Natural spring length between connected particles
-const SPRING_STRENGTH = 5.0; // Reduced for stability
-const SPRING_DAMPING_COEFFICIENT = 10; // Per-connection damping force
+const SPRING_REST_LENGTH = PARTICLE_SIZE * 1; // Natural spring length between connected particles
+
+// Critical damping calculation: c_critical = 2 * sqrt(k * m)
+const CRITICAL_DAMPING = 2.0 * @sqrt(SPRING_STRENGTH * PARTICLE_MASS);
+const SPRING_DAMPING_COEFFICIENT = CRITICAL_DAMPING * 0.1; // 10% of critical for slight underdamping
+
 const GLOBAL_DAMPING = 0.99; // Air resistance simulation
 const GRID_SPACING = SPRING_REST_LENGTH * 1.1; // Base spacing between grid particles
 
@@ -205,43 +211,48 @@ const Particle = struct {
             }
         }
 
-        // Apply Boids forces
-        self.vx += force_x * dt;
-        self.vy += force_y * dt;
+        // Semi-implicit Euler integration for better stability
 
-        // Apply spring forces if this is a grid particle (damping is now built into spring calculation)
+        // Calculate ALL forces first
+        var total_force_x = force_x;
+        var total_force_y = force_y;
+
+        // Add spring forces if this is a grid particle
         if (self.particle_type == ParticleType.grid_particle) {
             const spring_force = self.calculateSpringForces(particle_index);
-            self.vx += spring_force.x * dt;
-            self.vy += spring_force.y * dt;
+            total_force_x += spring_force.x;
+            total_force_y += spring_force.y;
         }
 
-        // Apply mouse spring force if this particle is connected to mouse
+        // Add mouse spring force if this particle is connected to mouse
         const mouse_force = applyMouseSpringForce(particle_index);
-        self.vx += mouse_force.x * dt;
-        self.vy += mouse_force.y * dt;
+        total_force_x += mouse_force.x;
+        total_force_y += mouse_force.y;
 
-        // Apply global damping (air resistance simulation) - more realistic than speed capping
+        // Add damping as a force (proper semi-implicit approach)
+        var damping_factor: f32 = 1.0 - GLOBAL_DAMPING; // Convert damping coefficient to force
         if (mouse_has_connection and particle_index == mouse_connected_particle) {
-            // Less damping for mouse-connected particles for responsiveness
-            self.vx *= 0.99;
-            self.vy *= 0.99;
-        } else {
-            self.vx *= GLOBAL_DAMPING;
-            self.vy *= GLOBAL_DAMPING;
+            damping_factor = 0.01; // Less damping for mouse-connected particles
         }
+
+        total_force_x -= self.vx * damping_factor / dt; // Damping opposes velocity
+        total_force_y -= self.vy * damping_factor / dt;
+
+        // Update velocity FIRST (key of semi-implicit Euler)
+        self.vx += total_force_x * dt;
+        self.vy += total_force_y * dt;
 
         // Soft speed limit - only apply if velocity is extremely high to prevent instability
         const speed_sq = self.vx * self.vx + self.vy * self.vy;
         const max_speed_sq = MAX_SPEED * MAX_SPEED;
-        if (speed_sq > max_speed_sq * 4.0) { // 2x normal max speed before limiting
+        if (speed_sq > max_speed_sq * 4.0) {
             const speed = @sqrt(speed_sq);
             const limit = MAX_SPEED * 2.0;
             self.vx = (self.vx / speed) * limit;
             self.vy = (self.vy / speed) * limit;
         }
 
-        // Update position
+        // THEN update position using the new velocity (semi-implicit step)
         self.x += self.vx * dt;
         self.y += self.vy * dt;
 
