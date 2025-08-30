@@ -24,3 +24,32 @@ canvas {
   border: 1px solid #333;
   z-index: 1000;
 }
+
+#controls {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  display: flex;
+  gap: 8px;
+  z-index: 1000;
+}
+
+#controls button {
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  border: 1px solid #555;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+#controls button:hover {
+  background: rgba(40, 40, 40, 0.9);
+}
+
+#controls button:active {
+  background: rgba(20, 20, 20, 0.9);
+}

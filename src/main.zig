@@ -2,32 +2,37 @@ const std = @import("std");
 const math = std.math;
 
 // Enhanced particle system: grids + free agents
-const GRID_COUNT = 5; // Number of 16x16 spring-connected grids
-const GRID_PARTICLE_SIZE = 10; // 16x16 particles per grid
-const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE; // 256 particles per grid
-const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID; // 1280 grid particles
-const FREE_AGENT_COUNT = 200; // Free-roaming Boids
-const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT; // 3280 total
+const GRID_COUNT = 5;
+const GRID_PARTICLE_SIZE = 10;
+const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
+const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID;
+const FREE_AGENT_COUNT = 200;
+const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
+
+// Particle physical properties
+const PARTICLE_SIZE = 0.008; // Physical radius of particles
 const MAX_SPEED = 0.2;
-const MAX_FORCE = 0.3;
-const SEPARATION_RADIUS = 0.016;
+
+// Boids behavior radii (based on particle size for physical accuracy)
+const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5;
 const ALIGNMENT_RADIUS = 0.15;
 const COHESION_RADIUS = 0.25;
 const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
 
 // Force strength multipliers
-const SEPARATION_STRENGTH = 20.0;
+const SEPARATION_STRENGTH = 10.0;
 const ALIGNMENT_STRENGTH = 0.0;
 const COHESION_STRENGTH = 0.0;
 
 // Spring system parameters
-const SPRING_REST_LENGTH = 0.02; // Natural spring length between connected particles
-const SPRING_STRENGTH = 100.15; // Spring force coefficient
-const SPRING_DAMPING = 0.95; // Velocity damping for stability
-const GRID_SPACING = 0.01; // Base spacing between grid particles
+const SPRING_REST_LENGTH = PARTICLE_SIZE * 2; // Natural spring length between connected particles
+const SPRING_STRENGTH = 5.0; // Reduced for stability
+const SPRING_DAMPING_COEFFICIENT = 10; // Per-connection damping force
+const GLOBAL_DAMPING = 0.99; // Air resistance simulation
+const GRID_SPACING = SPRING_REST_LENGTH * 1.1; // Base spacing between grid particles
 
 // Spatial partitioning grid for O(n) performance
-const GRID_SIZE = 25; // 25x25 grid
+const GRID_SIZE = 25;
 const GRID_CELL_SIZE = WORLD_SIZE / GRID_SIZE;
 const MAX_PARTICLES_PER_CELL = 500;
 
@@ -161,15 +166,15 @@ const Particle = struct {
         var force_x: f32 = 0;
         var force_y: f32 = 0;
 
-        // Separation force
+        // Separation force - direct force application without artificial limit
         if (sep_count > 0) {
             sep_x /= sep_count;
             sep_y /= sep_count;
 
             const sep_mag = @sqrt(sep_x * sep_x + sep_y * sep_y);
             if (sep_mag > 0) {
-                force_x += (sep_x / sep_mag) * MAX_FORCE * SEPARATION_STRENGTH;
-                force_y += (sep_y / sep_mag) * MAX_FORCE * SEPARATION_STRENGTH;
+                force_x += (sep_x / sep_mag) * SEPARATION_STRENGTH;
+                force_y += (sep_y / sep_mag) * SEPARATION_STRENGTH;
             }
         }
 
@@ -180,8 +185,8 @@ const Particle = struct {
 
             const ali_mag = @sqrt(ali_x * ali_x + ali_y * ali_y);
             if (ali_mag > 0) {
-                force_x += (ali_x / ali_mag) * MAX_FORCE * ALIGNMENT_STRENGTH;
-                force_y += (ali_y / ali_mag) * MAX_FORCE * ALIGNMENT_STRENGTH;
+                force_x += (ali_x / ali_mag) * ALIGNMENT_STRENGTH;
+                force_y += (ali_y / ali_mag) * ALIGNMENT_STRENGTH;
             }
         }
 
@@ -195,8 +200,8 @@ const Particle = struct {
 
             const coh_mag = @sqrt(coh_x * coh_x + coh_y * coh_y);
             if (coh_mag > 0) {
-                force_x += (coh_x / coh_mag) * MAX_FORCE * COHESION_STRENGTH;
-                force_y += (coh_y / coh_mag) * MAX_FORCE * COHESION_STRENGTH;
+                force_x += (coh_x / coh_mag) * COHESION_STRENGTH;
+                force_y += (coh_y / coh_mag) * COHESION_STRENGTH;
             }
         }
 
@@ -204,20 +209,11 @@ const Particle = struct {
         self.vx += force_x * dt;
         self.vy += force_y * dt;
 
-        // Apply spring forces and damping if this is a grid particle
+        // Apply spring forces if this is a grid particle (damping is now built into spring calculation)
         if (self.particle_type == ParticleType.grid_particle) {
             const spring_force = self.calculateSpringForces(particle_index);
             self.vx += spring_force.x * dt;
             self.vy += spring_force.y * dt;
-
-            // Apply damping to grid particles for stability (less damping for mouse-connected particles)
-            if (mouse_has_connection and particle_index == mouse_connected_particle) {
-                self.vx *= 0.98; // Much less damping for mouse-connected particles
-                self.vy *= 0.98;
-            } else {
-                self.vx *= SPRING_DAMPING;
-                self.vy *= SPRING_DAMPING;
-            }
         }
 
         // Apply mouse spring force if this particle is connected to mouse
@@ -225,24 +221,24 @@ const Particle = struct {
         self.vx += mouse_force.x * dt;
         self.vy += mouse_force.y * dt;
 
-        // Limit speed (allow higher speed for mouse-connected particles)
-        const speed_sq = self.vx * self.vx + self.vy * self.vy;
+        // Apply global damping (air resistance simulation) - more realistic than speed capping
         if (mouse_has_connection and particle_index == mouse_connected_particle) {
-            // 5x higher speed limit for mouse-connected particles
-            const mouse_max_speed = MAX_SPEED * 5.0;
-            const mouse_max_speed_sq = mouse_max_speed * mouse_max_speed;
-            if (speed_sq > mouse_max_speed_sq) {
-                const speed = @sqrt(speed_sq);
-                self.vx = (self.vx / speed) * mouse_max_speed;
-                self.vy = (self.vy / speed) * mouse_max_speed;
-            }
+            // Less damping for mouse-connected particles for responsiveness
+            self.vx *= 0.99;
+            self.vy *= 0.99;
         } else {
-            const max_speed_sq = MAX_SPEED * MAX_SPEED;
-            if (speed_sq > max_speed_sq) {
-                const speed = @sqrt(speed_sq);
-                self.vx = (self.vx / speed) * MAX_SPEED;
-                self.vy = (self.vy / speed) * MAX_SPEED;
-            }
+            self.vx *= GLOBAL_DAMPING;
+            self.vy *= GLOBAL_DAMPING;
+        }
+
+        // Soft speed limit - only apply if velocity is extremely high to prevent instability
+        const speed_sq = self.vx * self.vx + self.vy * self.vy;
+        const max_speed_sq = MAX_SPEED * MAX_SPEED;
+        if (speed_sq > max_speed_sq * 4.0) { // 2x normal max speed before limiting
+            const speed = @sqrt(speed_sq);
+            const limit = MAX_SPEED * 2.0;
+            self.vx = (self.vx / speed) * limit;
+            self.vy = (self.vy / speed) * limit;
         }
 
         // Update position
@@ -271,7 +267,7 @@ const Particle = struct {
         }
     }
 
-    // Calculate spring forces acting on this particle using optimized lookup
+    // Calculate spring forces with proper damping
     fn calculateSpringForces(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
         var total_force_x: f32 = 0;
         var total_force_y: f32 = 0;
@@ -294,14 +290,23 @@ const Particle = struct {
             if (distance > 0) {
                 // Spring force: F = k * (distance - rest_length)
                 const displacement = distance - spring.rest_length;
-                const force_magnitude = SPRING_STRENGTH * displacement;
+                const spring_force = SPRING_STRENGTH * displacement;
 
-                // Normalize direction and apply force
+                // Damping force: F = -b * relative_velocity
+                const relative_vx = other.vx - self.vx;
+                const relative_vy = other.vy - self.vy;
                 const norm_x = dx / distance;
                 const norm_y = dy / distance;
 
-                total_force_x += force_magnitude * norm_x;
-                total_force_y += force_magnitude * norm_y;
+                // Project relative velocity onto spring direction
+                const relative_velocity_along_spring = relative_vx * norm_x + relative_vy * norm_y;
+                const damping_force = SPRING_DAMPING_COEFFICIENT * relative_velocity_along_spring;
+
+                // Total force = spring + damping
+                const total_force_magnitude = spring_force + damping_force;
+
+                total_force_x += total_force_magnitude * norm_x;
+                total_force_y += total_force_magnitude * norm_y;
             }
         }
 
@@ -332,8 +337,8 @@ const Particle = struct {
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
-                steer_x = (steer_x / mag) * MAX_FORCE;
-                steer_y = (steer_y / mag) * MAX_FORCE;
+                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
+                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
             }
         }
 
@@ -364,8 +369,8 @@ const Particle = struct {
             // Normalize and scale
             const mag = @sqrt(sum_x * sum_x + sum_y * sum_y);
             if (mag > 0) {
-                sum_x = (sum_x / mag) * MAX_FORCE;
-                sum_y = (sum_y / mag) * MAX_FORCE;
+                sum_x = (sum_x / mag) * ALIGNMENT_STRENGTH;
+                sum_y = (sum_y / mag) * ALIGNMENT_STRENGTH;
             }
         }
 
@@ -400,8 +405,8 @@ const Particle = struct {
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
-                steer_x = (steer_x / mag) * MAX_FORCE;
-                steer_y = (steer_y / mag) * MAX_FORCE;
+                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
+                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
             }
 
             return .{ .x = steer_x, .y = steer_y };
@@ -456,8 +461,8 @@ const Particle = struct {
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
-                steer_x = (steer_x / mag) * MAX_FORCE;
-                steer_y = (steer_y / mag) * MAX_FORCE;
+                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
+                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
             }
         }
 
@@ -509,8 +514,8 @@ const Particle = struct {
             // Normalize and scale
             const mag = @sqrt(sum_x * sum_x + sum_y * sum_y);
             if (mag > 0) {
-                sum_x = (sum_x / mag) * MAX_FORCE;
-                sum_y = (sum_y / mag) * MAX_FORCE;
+                sum_x = (sum_x / mag) * ALIGNMENT_STRENGTH;
+                sum_y = (sum_y / mag) * ALIGNMENT_STRENGTH;
             }
         }
 
@@ -566,8 +571,8 @@ const Particle = struct {
             // Normalize and scale
             const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
             if (mag > 0) {
-                steer_x = (steer_x / mag) * MAX_FORCE;
-                steer_y = (steer_y / mag) * MAX_FORCE;
+                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
+                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
             }
 
             return .{ .x = steer_x, .y = steer_y };
@@ -876,6 +881,20 @@ export fn init() void {
     }
 }
 
+export fn reset() void {
+    log("Resetting particle system...", .{});
+
+    // Reset mouse interaction
+    mouse_pressed = false;
+    mouse_has_connection = false;
+
+    // Reinitialize all particles to starting positions
+    initializeGridParticles();
+    initializeFreeAgents();
+
+    log("Particle system reset complete", .{});
+}
+
 export fn update_particles(dt: f32) void {
     if (!particles_initialized) return;
 
@@ -908,6 +927,10 @@ export fn get_max_particles() i32 {
 
 export fn get_max_springs() i32 {
     return MAX_SPRINGS;
+}
+
+export fn get_particle_size() f32 {
+    return PARTICLE_SIZE;
 }
 
 export fn get_spring_count() i32 {

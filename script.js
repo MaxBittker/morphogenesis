@@ -11,6 +11,10 @@ let mousePressed = false;
 let mouseX = 0;
 let mouseY = 0;
 
+// Simulation control state
+let isPaused = false;
+let stepRequested = false;
+
 function log(message) {
   console.log(message);
 }
@@ -84,6 +88,25 @@ canvas.addEventListener('pointerup', (event) => {
   wasmModule.exports.set_mouse_interaction(mouseX, mouseY, false);
 });
 
+// Control button event handlers
+document.getElementById('pause-btn').addEventListener('click', () => {
+  isPaused = !isPaused;
+  const btn = document.getElementById('pause-btn');
+  btn.textContent = isPaused ? 'Resume' : 'Pause';
+});
+
+document.getElementById('step-btn').addEventListener('click', () => {
+  if (isPaused) {
+    stepRequested = true;
+  }
+});
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (wasmModule) {
+    wasmModule.exports.reset(); // Reset simulation to initial state
+  }
+});
+
 async function initRenderer() {
   // Create and initialize the renderer
   renderer = new MorphogenesisRenderer(canvas);
@@ -130,18 +153,27 @@ function renderFrame() {
     return;
   }
 
-  time += 0.016; // ~60fps timing
+  // Check pause/step state
+  const shouldUpdate = !isPaused || stepRequested;
+  if (stepRequested) {
+    stepRequested = false;
+  }
 
-  // Time the particle update loop
-  const updateStart = performance.now();
-  wasmModule.exports.update_particles(0.016);
-  const updateEnd = performance.now();
-  updateTimeMs = Math.round(updateEnd - updateStart);
+  if (shouldUpdate) {
+    time += 0.016; // ~60fps timing
+
+    // Time the particle update loop
+    const updateStart = performance.now();
+    wasmModule.exports.update_particles(0.016);
+    const updateEnd = performance.now();
+    updateTimeMs = Math.round(updateEnd - updateStart);
+  }
 
   // Update timing display
-  timingDisplay.textContent = `Update: ${updateTimeMs}ms`;
+  const statusText = isPaused ? "PAUSED" : `Update: ${updateTimeMs}ms`;
+  timingDisplay.textContent = statusText;
 
-  // Render using the renderer
+  // Always render (even when paused) to show current state
   renderer.render(wasmModule);
 
   // Continue animation

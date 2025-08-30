@@ -90,8 +90,9 @@ class MorphogenesisRenderer {
     this.gridSize = wasmModule.exports.get_grid_size();
     this.maxParticles = wasmModule.exports.get_max_particles();
     this.maxSprings = wasmModule.exports.get_max_springs();
+    this.particleSize = wasmModule.exports.get_particle_size();
     
-    this.log(`Constants from WASM: world=${this.worldSize}, grid=${this.gridSize}, particles=${this.maxParticles}, springs=${this.maxSprings}`);
+    this.log(`Constants from WASM: world=${this.worldSize}, grid=${this.gridSize}, particles=${this.maxParticles}, springs=${this.maxSprings}, particleSize=${this.particleSize}`);
   }
 
   createShaders() {
@@ -99,6 +100,7 @@ class MorphogenesisRenderer {
     const particleVertexShaderCode = `
       struct Uniforms {
           aspect_ratio: f32,
+          particle_size: f32,
       }
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
@@ -118,8 +120,7 @@ class MorphogenesisRenderer {
           var output: VertexOutput;
           
           // Create square around particle position for circle rendering
-          let particle_size = 0.008; 
-          var scaled_pos = input.position * particle_size;
+          var scaled_pos = input.position * uniforms.particle_size;
           
           // Adjust for aspect ratio to keep circles circular
           if (uniforms.aspect_ratio > 1.0) {
@@ -418,9 +419,9 @@ class MorphogenesisRenderer {
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
 
-    // Uniform buffer for aspect ratio
+    // Uniform buffer for aspect ratio and particle size
     this.uniformBuffer = this.device.createBuffer({
-      size: 4,
+      size: 8, // 4 bytes for aspect_ratio + 4 bytes for particle_size
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -449,7 +450,7 @@ class MorphogenesisRenderer {
     this.particlePositionsBuffer = new Float32Array(this.maxParticles * 2);
     this.springVerticesBuffer = new Float32Array(this.maxSprings * 4);
     this.mouseSpringVerticesBuffer = new Float32Array(4); // One line: x1, y1, x2, y2
-    this.aspectRatioBuffer = new Float32Array(1);
+    this.uniformsBuffer = new Float32Array(2); // aspect_ratio, particle_size
 
     this.log("Buffers created successfully");
   }
@@ -479,10 +480,11 @@ class MorphogenesisRenderer {
   }
 
   updateData(wasmModule) {
-    // Update aspect ratio uniform
+    // Update uniforms (aspect ratio and particle size)
     const aspectRatio = window.aspectRatio || this.canvas.width / this.canvas.height;
-    this.aspectRatioBuffer[0] = aspectRatio;
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.aspectRatioBuffer);
+    this.uniformsBuffer[0] = aspectRatio;
+    this.uniformsBuffer[1] = this.particleSize;
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformsBuffer);
 
     // Get particle data
     const particleCount = wasmModule.exports.get_particle_count();
