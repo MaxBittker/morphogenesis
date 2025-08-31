@@ -198,7 +198,7 @@ class MorphogenesisRenderer {
     const springFragmentShaderCode = `
       @fragment
       fn main() -> @location(0) vec4<f32> {
-          return vec4<f32>(0.8, 0.6, 0.2, 0.3);
+          return vec4<f32>(1.0, 1.0, 1.0, 0.9); // Bright white, very opaque
       }
     `;
 
