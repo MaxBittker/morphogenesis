@@ -1,12 +1,17 @@
 const std = @import("std");
 
-// Spatial partitioning grid for O(n) performance
-pub const GRID_SIZE = 25;
-pub const MAX_PARTICLES_PER_CELL = 500;
-
-// Pre-calculated constants for worldToGrid optimization  
+// Pre-calculated constants for worldToGrid optimization
 const main_module = @import("main.zig");
 const BASE_WORLD_SIZE = main_module.WORLD_SIZE;
+
+// Spatial partitioning grid for O(n) performance
+// Fixed bin size = 10 particle diameters
+pub const BIN_SIZE_PIXELS = 6.0 * (2.0 * main_module.PARTICLE_SIZE); // 10 particle diameters
+pub const MAX_PARTICLES_PER_CELL = 500;
+
+// Dynamic grid size based on world dimensions and fixed bin size
+pub var grid_size_x: u32 = 0;
+pub var grid_size_y: u32 = 0;
 
 // Spatial grid cell structure
 pub const GridCell = struct {
@@ -34,25 +39,27 @@ pub const GridCell = struct {
     }
 };
 
-// Spatial grid for fast neighbor queries
-pub var spatial_grid: [GRID_SIZE][GRID_SIZE]GridCell = undefined;
-var grid_initialized = false;
+// Maximum grid dimensions (for static allocation)
+const MAX_GRID_SIZE = 100;
 
-// Spatial grid helper functions with aspect-aware scaling
+// Spatial grid for fast neighbor queries (using max size for static allocation)
+pub var spatial_grid: [MAX_GRID_SIZE][MAX_GRID_SIZE]GridCell = undefined;
+var grid_initialized = false;
+var max_occupancy: u32 = 0;
+
+// Spatial grid helper functions with fixed bin size
 pub inline fn worldToGridX(world_x: f32) i32 {
     const world_width = main_module.get_world_width();
-    const grid_scale_x = @as(f32, GRID_SIZE) / world_width;
     const world_half_x = world_width / 2.0;
-    const grid_pos = @as(i32, @intFromFloat((world_x + world_half_x) * grid_scale_x));
-    return @max(0, @min(GRID_SIZE - 1, grid_pos));
+    const grid_pos = @as(i32, @intFromFloat((world_x + world_half_x) / BIN_SIZE_PIXELS));
+    return @max(0, @min(@as(i32, @intCast(grid_size_x)) - 1, grid_pos));
 }
 
 pub inline fn worldToGridY(world_y: f32) i32 {
     const world_height = main_module.get_world_height();
-    const grid_scale_y = @as(f32, GRID_SIZE) / world_height;
     const world_half_y = world_height / 2.0;
-    const grid_pos = @as(i32, @intFromFloat((world_y + world_half_y) * grid_scale_y));
-    return @max(0, @min(GRID_SIZE - 1, grid_pos));
+    const grid_pos = @as(i32, @intFromFloat((world_y + world_half_y) / BIN_SIZE_PIXELS));
+    return @max(0, @min(@as(i32, @intCast(grid_size_y)) - 1, grid_pos));
 }
 
 // Legacy function for compatibility
@@ -66,10 +73,21 @@ pub fn getGridCell(x: f32, y: f32) *GridCell {
     return &spatial_grid[@intCast(gx)][@intCast(gy)];
 }
 
+pub fn updateGridDimensions() void {
+    // Calculate grid dimensions based on world size and fixed bin size
+    const world_width = main_module.get_world_width();
+    const world_height = main_module.get_world_height();
+
+    grid_size_x = @min(MAX_GRID_SIZE, @max(1, @as(u32, @intFromFloat(world_width / BIN_SIZE_PIXELS)) + 1));
+    grid_size_y = @min(MAX_GRID_SIZE, @max(1, @as(u32, @intFromFloat(world_height / BIN_SIZE_PIXELS)) + 1));
+}
+
 pub fn initializeGrid() void {
     if (!grid_initialized) {
-        for (0..GRID_SIZE) |i| {
-            for (0..GRID_SIZE) |j| {
+        updateGridDimensions();
+
+        for (0..MAX_GRID_SIZE) |i| {
+            for (0..MAX_GRID_SIZE) |j| {
                 spatial_grid[i][j] = GridCell.init();
             }
         }
@@ -78,8 +96,9 @@ pub fn initializeGrid() void {
 }
 
 pub fn clearGrid() void {
-    for (0..GRID_SIZE) |i| {
-        for (0..GRID_SIZE) |j| {
+    max_occupancy = 0;
+    for (0..grid_size_x) |i| {
+        for (0..grid_size_y) |j| {
             spatial_grid[i][j].clear();
         }
     }
@@ -91,5 +110,20 @@ pub fn populateGrid(particles: anytype, particle_count: u32) void {
         const particle = &particles[i];
         const cell = getGridCell(particle.x, particle.y);
         cell.add(@intCast(i));
+
+        // Track maximum occupancy
+        if (cell.count > max_occupancy) {
+            max_occupancy = cell.count;
+        }
     }
+}
+
+// Get current maximum bin occupancy
+pub fn getMaxOccupancy() u32 {
+    return max_occupancy;
+}
+
+// Get grid dimensions
+pub fn getGridDimensions() struct { width: u32, height: u32 } {
+    return .{ .width = grid_size_x, .height = grid_size_y };
 }

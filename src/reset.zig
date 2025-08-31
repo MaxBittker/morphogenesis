@@ -73,9 +73,15 @@ pub fn initializeFreeAgents() void {
 
     for (start_index..PARTICLE_COUNT) |i| {
         const seed = @as(f32, @floatFromInt(i));
-        // Spawn in a 800x600 pixel area around the center
-        const range_x = 400.0; // ±400 pixels horizontally 
-        const range_y = 300.0; // ±300 pixels vertically
+        // Spawn across the world dimensions (with fallback for first frame)
+        const world_width = main.get_world_width();
+        const world_height = main.get_world_height();
+        const fallback_width = 1920.0; // Reasonable default
+        const fallback_height = 1080.0; // Reasonable default
+        const actual_width = if (world_width > 10.0) world_width else fallback_width;
+        const actual_height = if (world_height > 10.0) world_height else fallback_height;
+        const range_x = actual_width * 0.4; // Use 80% of world width centered
+        const range_y = actual_height * 0.4; // Use 80% of world height centered
         const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range_x;
         const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range_y;
 

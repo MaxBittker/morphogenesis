@@ -4,15 +4,15 @@ const spatial = @import("spatial.zig");
 const reset_module = @import("reset.zig");
 
 // XPBD particle system: grids + free agents
-pub const GRID_COUNT = 25;
-pub const GRID_PARTICLE_SIZE = 3;
+pub const GRID_COUNT = 10;
+pub const GRID_PARTICLE_SIZE = 8;
 pub const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
 pub const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID;
-pub const FREE_AGENT_COUNT = 1;
+pub const FREE_AGENT_COUNT = 5000;
 pub const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
 
 // Particle physical properties
-const PARTICLE_SIZE = 15.0; // Physical radius in pixels
+pub const PARTICLE_SIZE = 6.0; // Physical radius in pixels
 const PARTICLE_MASS = 1.0; // Normalized particle mass
 pub const WORLD_SIZE = 1.95; // Base world size (height for portrait, width for landscape)
 
@@ -30,9 +30,9 @@ const COLLISION_STIFFNESS = 100000.0; // Much stiffer for snappy collisions
 const MOUSE_STIFFNESS = 50000.0;
 
 // Constraint distances
-pub const SPRING_REST_LENGTH = PARTICLE_SIZE * 1; // Natural spring length between connected particles
+pub const SPRING_REST_LENGTH = PARTICLE_SIZE * 1.1; // Natural spring length between connected particles
 const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5; // Minimum distance between particles
-pub const GRID_SPACING = PARTICLE_SIZE * 3.0; // Base spacing between grid particles (avoid overlaps)
+pub const GRID_SPACING = PARTICLE_SIZE * 2.6; // Base spacing between grid particles (avoid overlaps)
 
 // Boids constraint parameters
 const BOIDS_SEPARATION_RADIUS = PARTICLE_SIZE * 3.0; // Separation distance for boids
@@ -50,9 +50,7 @@ const GRAVITY = 9.8; // Gravity acceleration
 const SPRING_STRENGTH = DISTANCE_STIFFNESS;
 const SEPARATION_STRENGTH = COLLISION_STIFFNESS;
 
-// Spatial partitioning (now in spatial.zig)
-const GRID_SIZE = spatial.GRID_SIZE;
-const GRID_CELL_SIZE = WORLD_SIZE / GRID_SIZE;
+// Spatial partitioning (now in spatial.zig with dynamic sizing)
 
 // XPBD Constraint Types
 const ConstraintType = enum {
@@ -500,6 +498,7 @@ fn generateConstraints(dt: f32) void {
 
     // Generate collision constraints using spatial grid
     spatial.populateGrid(particles, PARTICLE_COUNT);
+
     for (0..PARTICLE_COUNT) |i| {
         generateCollisionConstraintsForParticle(@intCast(i), dt);
     }
@@ -525,7 +524,7 @@ fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
             const check_x = gx + dx;
             const check_y = gy + dy;
 
-            if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
+            if (check_x >= 0 and check_x < @as(i32, @intCast(spatial.grid_size_x)) and check_y >= 0 and check_y < @as(i32, @intCast(spatial.grid_size_y))) {
                 const cell = &spatial.spatial_grid[@intCast(check_x)][@intCast(check_y)];
 
                 for (0..cell.count) |i| {
@@ -590,7 +589,7 @@ fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
             const check_x = gx + dx;
             const check_y = gy + dy;
 
-            if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
+            if (check_x >= 0 and check_x < @as(i32, @intCast(spatial.grid_size_x)) and check_y >= 0 and check_y < @as(i32, @intCast(spatial.grid_size_y))) {
                 const cell = &spatial.spatial_grid[@intCast(check_x)][@intCast(check_y)];
 
                 for (0..cell.count) |i| {
@@ -1042,15 +1041,36 @@ pub export fn get_world_height() f32 {
 pub export fn set_world_dimensions(width: f32, height: f32) void {
     world_width = width;
     world_height = height;
+    spatial.updateGridDimensions();
     log("World dimensions updated: {d:.2} x {d:.2}", .{ world_width, world_height });
 }
 
 export fn get_grid_size() i32 {
-    return GRID_SIZE;
+    return @as(i32, @intCast(@max(spatial.grid_size_x, spatial.grid_size_y)));
+}
+
+export fn get_grid_dimensions_x() i32 {
+    return @as(i32, @intCast(spatial.grid_size_x));
+}
+
+export fn get_grid_dimensions_y() i32 {
+    return @as(i32, @intCast(spatial.grid_size_y));
+}
+
+export fn get_world_width_debug() f32 {
+    return world_width;
+}
+
+export fn get_world_height_debug() f32 {
+    return world_height;
 }
 
 export fn get_max_particles() i32 {
     return PARTICLE_COUNT + 1000; // Buffer for safety
+}
+
+export fn get_spatial_max_occupancy() i32 {
+    return @as(i32, @intCast(spatial.getMaxOccupancy()));
 }
 
 export fn get_max_springs() i32 {

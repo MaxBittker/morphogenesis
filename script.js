@@ -183,8 +183,18 @@ function renderFrame() {
     updateTimeMs = Math.round(updateEnd - updateStart);
   }
 
-  // Update timing display
-  const statusText = isPaused ? "PAUSED" : `Update: ${updateTimeMs}ms`;
+  // Update timing display with spatial occupancy
+  let statusText;
+  if (isPaused) {
+    statusText = "PAUSED";
+  } else {
+    const maxOccupancy = wasmModule.exports.get_spatial_max_occupancy();
+    const gridX = wasmModule.exports.get_grid_dimensions_x();
+    const gridY = wasmModule.exports.get_grid_dimensions_y();
+    const worldW = Math.round(wasmModule.exports.get_world_width_debug());
+    const worldH = Math.round(wasmModule.exports.get_world_height_debug());
+    statusText = `Update: ${updateTimeMs}ms | World: ${worldW}x${worldH} | Grid: ${gridX}x${gridY} | Max bin: ${maxOccupancy}`;
+  }
   timingDisplay.textContent = statusText;
 
   // Always render (even when paused) to show current state
