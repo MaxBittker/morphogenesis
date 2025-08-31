@@ -1,18 +1,20 @@
 const std = @import("std");
 const math = std.math;
+const spatial = @import("spatial.zig");
+const reset_module = @import("reset.zig");
 
 // XPBD particle system: grids + free agents
-const GRID_COUNT = 25;
-const GRID_PARTICLE_SIZE = 3;
-const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
-const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID;
-const FREE_AGENT_COUNT = 1;
-const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
+pub const GRID_COUNT = 25;
+pub const GRID_PARTICLE_SIZE = 3;
+pub const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
+pub const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID;
+pub const FREE_AGENT_COUNT = 1;
+pub const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
 
 // Particle physical properties
 const PARTICLE_SIZE = 0.02; // Physical radius of particles
 const PARTICLE_MASS = 1.0; // Normalized particle mass
-const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
+pub const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
 
 // XPBD solver parameters
 const XPBD_ITERATIONS = 5; // Constraint solver iterations per timestep
@@ -24,9 +26,9 @@ const COLLISION_STIFFNESS = 100000.0; // Much stiffer for snappy collisions
 const MOUSE_STIFFNESS = 50000.0;
 
 // Constraint distances
-const SPRING_REST_LENGTH = PARTICLE_SIZE * 1; // Natural spring length between connected particles
+pub const SPRING_REST_LENGTH = PARTICLE_SIZE * 1; // Natural spring length between connected particles
 const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5; // Minimum distance between particles
-const GRID_SPACING = PARTICLE_SIZE * 3.0; // Base spacing between grid particles (avoid overlaps)
+pub const GRID_SPACING = PARTICLE_SIZE * 3.0; // Base spacing between grid particles (avoid overlaps)
 
 // Boids constraint parameters
 const BOIDS_SEPARATION_RADIUS = PARTICLE_SIZE * 3.0; // Separation distance for boids
@@ -44,14 +46,9 @@ const GRAVITY = 9.8; // Gravity acceleration
 const SPRING_STRENGTH = DISTANCE_STIFFNESS;
 const SEPARATION_STRENGTH = COLLISION_STIFFNESS;
 
-// Spatial partitioning grid for O(n) performance
-const GRID_SIZE = 25;
+// Spatial partitioning (now in spatial.zig)
+const GRID_SIZE = spatial.GRID_SIZE;
 const GRID_CELL_SIZE = WORLD_SIZE / GRID_SIZE;
-const MAX_PARTICLES_PER_CELL = 500;
-
-// Pre-calculated constants for worldToGrid optimization
-const GRID_SCALE = @as(f32, GRID_SIZE) / WORLD_SIZE;
-const WORLD_HALF = WORLD_SIZE / 2.0;
 
 // XPBD Constraint Types
 const ConstraintType = enum {
@@ -222,19 +219,19 @@ const CohesionConstraint = struct {
 };
 
 // Vector2 helper
-const Vec2 = struct {
+pub const Vec2 = struct {
     x: f32,
     y: f32,
 };
 
 // Particle type enumeration
-const ParticleType = enum {
+pub const ParticleType = enum {
     grid_particle, // Part of a spring-connected grid
     free_agent, // Independent Boid
 };
 
 // XPBD Particle structure
-const Particle = struct {
+pub const Particle = struct {
     x: f32,
     y: f32,
     predicted_x: f32, // Position prediction for XPBD
@@ -346,36 +343,6 @@ var boids_alignment_constraint_count: u32 = 0;
 var boids_cohesion_constraints: [MAX_BOIDS_COHESION_CONSTRAINTS]CohesionConstraint = undefined;
 var boids_cohesion_constraint_count: u32 = 0;
 
-// Spatial grid cell structure
-const GridCell = struct {
-    particles: [MAX_PARTICLES_PER_CELL]u32,
-    count: u32,
-
-    const Self = @This();
-
-    pub fn init() Self {
-        return Self{
-            .particles = undefined,
-            .count = 0,
-        };
-    }
-
-    pub fn clear(self: *Self) void {
-        self.count = 0;
-    }
-
-    pub fn add(self: *Self, particle_index: u32) void {
-        if (self.count < MAX_PARTICLES_PER_CELL) {
-            self.particles[self.count] = particle_index;
-            self.count += 1;
-        }
-    }
-};
-
-// Spatial grid for fast neighbor queries
-var spatial_grid: [GRID_SIZE][GRID_SIZE]GridCell = undefined;
-var grid_initialized = false;
-
 // Global particle system
 var particles: [PARTICLE_COUNT]Particle = undefined;
 var particles_initialized = false;
@@ -384,10 +351,10 @@ var particles_initialized = false;
 // Each particle has up to 6 connections, but springs are shared between particles
 // In practice, each particle contributes ~3 unique springs to avoid double-counting
 // Safety margin: use 4 springs per particle to ensure we don't hit the limit
-const MAX_SPRINGS = GRID_COUNT * PARTICLES_PER_GRID * 4;
+pub const MAX_SPRINGS = GRID_COUNT * PARTICLES_PER_GRID * 4;
 
 // Legacy Spring structure for backward compatibility
-const Spring = struct {
+pub const Spring = struct {
     particle_a: u32,
     particle_b: u32,
     rest_length: f32,
@@ -406,7 +373,7 @@ var spring_count: u32 = 0;
 var springs_initialized = false;
 
 // Connection lookup optimization: store spring indices for each particle
-const MAX_CONNECTIONS_PER_PARTICLE = 6; // Maximum 6 springs per grid particle (triangular lattice)
+pub const MAX_CONNECTIONS_PER_PARTICLE = 6; // Maximum 6 springs per grid particle (triangular lattice)
 var particle_connections: [PARTICLE_COUNT][MAX_CONNECTIONS_PER_PARTICLE]u32 = undefined;
 var particle_connection_counts: [PARTICLE_COUNT]u8 = undefined;
 
@@ -451,234 +418,39 @@ fn getHueSimilarity(hue1: f32, hue2: f32) f32 {
     return similarity;
 }
 
-// Spatial grid helper functions
-inline fn worldToGrid(world_pos: f32) i32 {
-    // Optimized: single multiply instead of add + divide + multiply
-    const grid_pos = @as(i32, @intFromFloat((world_pos + WORLD_HALF) * GRID_SCALE));
-    return @max(0, @min(GRID_SIZE - 1, grid_pos));
-}
-
-fn getGridCell(x: f32, y: f32) *GridCell {
-    const gx = worldToGrid(x);
-    const gy = worldToGrid(y);
-    return &spatial_grid[@intCast(gx)][@intCast(gy)];
-}
-
-fn initializeGrid() void {
-    if (!grid_initialized) {
-        for (0..GRID_SIZE) |i| {
-            for (0..GRID_SIZE) |j| {
-                spatial_grid[i][j] = GridCell.init();
-            }
-        }
-        grid_initialized = true;
-    }
-}
-
-fn clearGrid() void {
-    for (0..GRID_SIZE) |i| {
-        for (0..GRID_SIZE) |j| {
-            spatial_grid[i][j].clear();
-        }
-    }
-}
-
-fn populateGrid() void {
-    clearGrid();
-    for (0..PARTICLE_COUNT) |i| {
-        const particle = &particles[i];
-        const cell = getGridCell(particle.x, particle.y);
-        cell.add(@intCast(i));
-    }
-}
-
 var device_handle: u32 = 0;
 
-// Initialize grid particles in 5 separate 16x16 grids
-fn initializeGridParticles() void {
-    // Generate grid positions in a 5x5 layout
-    var grid_positions: [25][2]f32 = undefined;
-    var grid_index: u32 = 0;
-
-    for (0..5) |row| {
-        for (0..5) |col| {
-            const x = (@as(f32, @floatFromInt(col)) - 2.0) * 0.4;
-            const y = (@as(f32, @floatFromInt(row)) - 2.0) * 0.4;
-            grid_positions[grid_index] = [_]f32{ x, y };
-            grid_index += 1;
-        }
-    }
-
-    var particle_index: u32 = 0;
-
-    for (0..GRID_COUNT) |grid_id| {
-        const base_x = grid_positions[grid_id][0];
-        const base_y = grid_positions[grid_id][1];
-
-        // Create hexagonal grid of particles with offset alternating rows
-        for (0..GRID_PARTICLE_SIZE) |row| {
-            for (0..GRID_PARTICLE_SIZE) |col| {
-                // Offset odd rows by half a column width to create hexagonal pattern
-                const col_offset: f32 = if (row % 2 == 1) 0.5 else 0.0;
-                const grid_center_offset: f32 = (@as(f32, @floatFromInt(GRID_PARTICLE_SIZE)) - 1.0) / 2.0;
-                const x = base_x + (@as(f32, @floatFromInt(col)) + col_offset - grid_center_offset) * GRID_SPACING;
-                // Reduce row spacing for hexagonal pattern (cos(30°) ≈ 0.866)
-                const y = base_y + (@as(f32, @floatFromInt(row)) - grid_center_offset) * GRID_SPACING * 0.866;
-
-                particles[particle_index] = Particle.init(x, y, ParticleType.grid_particle, @intCast(grid_id));
-                particle_index += 1;
-            }
-        }
-    }
+// Accessor functions for world module
+pub fn getParticle(index: u32) Particle {
+    return particles[index];
 }
 
-// Initialize free agent Boids with random positions
-fn initializeFreeAgents() void {
-    const start_index = TOTAL_GRID_PARTICLES;
-
-    for (start_index..PARTICLE_COUNT) |i| {
-        const seed = @as(f32, @floatFromInt(i));
-        const range = WORLD_SIZE * 0.8;
-        const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range;
-        const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range;
-
-        particles[i] = Particle.init(x, y, ParticleType.free_agent, 255);
-    }
+pub fn setParticle(index: u32, particle: Particle) void {
+    particles[index] = particle;
 }
 
-// Create hexagonal lattice connections within each grid
-fn initializeSprings() void {
-    spring_count = 0;
-
-    // Initialize connection lookup table
-    for (0..PARTICLE_COUNT) |i| {
-        particle_connection_counts[i] = 0;
-    }
-
-    for (0..GRID_COUNT) |grid_id| {
-        const grid_start = grid_id * PARTICLES_PER_GRID;
-        const springs_before = spring_count;
-
-        // Create hexagonal lattice connections (6-connected)
-        for (0..GRID_PARTICLE_SIZE) |row| {
-            for (0..GRID_PARTICLE_SIZE) |col| {
-                const current_particle = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col));
-                const is_odd_row = (row % 2 == 1);
-
-                // Connect to left neighbor
-                if (col > 0) {
-                    const left_particle = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col - 1));
-                    addSpringConnection(current_particle, left_particle);
-                }
-
-                // Connect to right neighbor
-                if (col < GRID_PARTICLE_SIZE - 1) {
-                    const right_particle = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col + 1));
-                    addSpringConnection(current_particle, right_particle);
-                }
-
-                // Connect to neighbors in the row above (hexagonal pattern)
-                if (row > 0) {
-                    if (is_odd_row) {
-                        // For odd rows: connect to upper-left and upper-right
-                        // Upper-left
-                        const upper_left = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, upper_left);
-                        // Upper-right
-                        if (col < GRID_PARTICLE_SIZE - 1) {
-                            const upper_right = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col + 1));
-                            addSpringConnection(current_particle, upper_right);
-                        }
-                    } else {
-                        // For even rows: connect to upper-left and upper-right
-                        // Upper-left
-                        if (col > 0) {
-                            const upper_left = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col - 1));
-                            addSpringConnection(current_particle, upper_left);
-                        }
-                        // Upper-right
-                        const upper_right = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, upper_right);
-                    }
-                }
-
-                // Connect to neighbors in the row below (hexagonal pattern)
-                if (row < GRID_PARTICLE_SIZE - 1) {
-                    if (is_odd_row) {
-                        // For odd rows: connect to lower-left and lower-right
-                        // Lower-left
-                        const lower_left = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, lower_left);
-                        // Lower-right
-                        if (col < GRID_PARTICLE_SIZE - 1) {
-                            const lower_right = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col + 1));
-                            addSpringConnection(current_particle, lower_right);
-                        }
-                    } else {
-                        // For even rows: connect to lower-left and lower-right
-                        // Lower-left
-                        if (col > 0) {
-                            const lower_left = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col - 1));
-                            addSpringConnection(current_particle, lower_left);
-                        }
-                        // Lower-right
-                        const lower_right = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, lower_right);
-                    }
-                }
-            }
-        }
-
-        const springs_created = spring_count - springs_before;
-        log("Grid {}: created {} springs (total: {})", .{ grid_id, springs_created, spring_count });
-    }
-
-    log("Total springs created: {} (max: {})", .{ spring_count, MAX_SPRINGS });
+pub fn getSpringCount() u32 {
+    return spring_count;
 }
 
-// Helper function to add a spring connection between two particles
-fn addSpringConnection(particle_a: u32, particle_b: u32) void {
-    if (spring_count >= MAX_SPRINGS) {
-        log("WARNING: Hit MAX_SPRINGS limit ({}) when trying to connect {} to {}", .{ MAX_SPRINGS, particle_a, particle_b });
-        return;
-    }
-
-    springs[spring_count] = Spring.init(particle_a, particle_b, SPRING_REST_LENGTH);
-
-    // Update connection lookup for both particles
-    addParticleConnection(particle_a, spring_count);
-    addParticleConnection(particle_b, spring_count);
-
-    spring_count += 1;
+pub fn setSpringCount(count: u32) void {
+    spring_count = count;
 }
 
-// Helper function to add a spring connection to a particle's lookup table
-fn addParticleConnection(particle_index: u32, spring_index: u32) void {
-    const count = particle_connection_counts[particle_index];
-    if (count < MAX_CONNECTIONS_PER_PARTICLE) {
-        particle_connections[particle_index][count] = spring_index;
-        particle_connection_counts[particle_index] += 1;
-    }
+pub fn setSpring(index: u32, spring: Spring) void {
+    springs[index] = spring;
 }
 
-// Find the closest particle to a given position
-fn findClosestParticle(target_x: f32, target_y: f32) u32 {
-    var closest_index: u32 = 0;
-    var closest_distance_sq: f32 = std.math.inf(f32);
+pub fn getParticleConnectionCount(particle_index: u32) u8 {
+    return particle_connection_counts[particle_index];
+}
 
-    for (0..PARTICLE_COUNT) |i| {
-        const particle = &particles[i];
-        const dx = target_x - particle.x;
-        const dy = target_y - particle.y;
-        const distance_sq = dx * dx + dy * dy;
+pub fn setParticleConnectionCount(particle_index: u32, count: u8) void {
+    particle_connection_counts[particle_index] = count;
+}
 
-        if (distance_sq < closest_distance_sq) {
-            closest_distance_sq = distance_sq;
-            closest_index = @intCast(i);
-        }
-    }
-
-    return closest_index;
+pub fn setParticleConnection(particle_index: u32, connection_index: u8, spring_index: u32) void {
+    particle_connections[particle_index][connection_index] = spring_index;
 }
 
 // XPBD constraint generation - creates distance, collision, and boids constraints
@@ -721,7 +493,7 @@ fn generateConstraints(dt: f32) void {
     }
 
     // Generate collision constraints using spatial grid
-    populateGrid();
+    spatial.populateGrid(particles, PARTICLE_COUNT);
     for (0..PARTICLE_COUNT) |i| {
         generateCollisionConstraintsForParticle(@intCast(i), dt);
     }
@@ -737,8 +509,8 @@ fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
     const particle = &particles[particle_index];
 
     // Check current cell and 8 surrounding cells
-    const gx = worldToGrid(particle.predicted_x);
-    const gy = worldToGrid(particle.predicted_y);
+    const gx = spatial.worldToGrid(particle.predicted_x);
+    const gy = spatial.worldToGrid(particle.predicted_y);
 
     var dy: i32 = -1;
     while (dy <= 1) : (dy += 1) {
@@ -748,7 +520,7 @@ fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
             const check_y = gy + dy;
 
             if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
-                const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
+                const cell = &spatial.spatial_grid[@intCast(check_x)][@intCast(check_y)];
 
                 for (0..cell.count) |i| {
                     const neighbor_index = cell.particles[i];
@@ -802,8 +574,8 @@ fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
     var neighbor_velocities_y: f32 = 0;
 
     // Check current cell and surrounding cells for neighbors
-    const gx = worldToGrid(particle.predicted_x);
-    const gy = worldToGrid(particle.predicted_y);
+    const gx = spatial.worldToGrid(particle.predicted_x);
+    const gy = spatial.worldToGrid(particle.predicted_y);
 
     var dy: i32 = -1;
     while (dy <= 1) : (dy += 1) {
@@ -813,7 +585,7 @@ fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
             const check_y = gy + dy;
 
             if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
-                const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
+                const cell = &spatial.spatial_grid[@intCast(check_x)][@intCast(check_y)];
 
                 for (0..cell.count) |i| {
                     const neighbor_index = cell.particles[i];
@@ -1175,19 +947,19 @@ export fn init() void {
     log("WebGPU device initialized: {}", .{device_handle});
 
     // Initialize spatial grid
-    initializeGrid();
+    spatial.initializeGrid();
 
     // Initialize particles
     if (!particles_initialized) {
-        initializeGridParticles();
-        initializeFreeAgents();
+        reset_module.initializeGridParticles();
+        reset_module.initializeFreeAgents();
         particles_initialized = true;
         log("Initialized {} total particles: {} grid + {} free agents", .{ PARTICLE_COUNT, TOTAL_GRID_PARTICLES, FREE_AGENT_COUNT });
     }
 
     // Initialize spring connections
     if (!springs_initialized) {
-        initializeSprings();
+        reset_module.initializeSprings();
         springs_initialized = true;
         log("Created {} spring connections for {} grids", .{ spring_count, GRID_COUNT });
     }
@@ -1201,8 +973,8 @@ export fn reset() void {
     mouse_has_connection = false;
 
     // Reinitialize all particles to starting positions
-    initializeGridParticles();
-    initializeFreeAgents();
+    reset_module.initializeGridParticles();
+    reset_module.initializeFreeAgents();
 
     log("Particle system reset complete", .{});
 }
@@ -1310,7 +1082,7 @@ export fn set_mouse_interaction(x: f32, y: f32, pressed: bool) void {
     if (pressed and !mouse_pressed) {
         // Mouse just pressed - find closest particle and create connection
         mouse_pressed = true;
-        mouse_connected_particle = findClosestParticle(x, y);
+        mouse_connected_particle = reset_module.findClosestParticle(x, y);
         mouse_has_connection = true;
     } else if (!pressed and mouse_pressed) {
         // Mouse just released - remove connection
@@ -1335,13 +1107,4 @@ export fn get_mouse_position_x() f32 {
 
 export fn get_mouse_position_y() f32 {
     return mouse_y;
-}
-
-// Test functions for debugging
-export fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-export fn compute_demo(input: f32) f32 {
-    return input * input;
 }
