@@ -1,7 +1,7 @@
 const std = @import("std");
 const math = std.math;
 
-// Enhanced particle system: grids + free agents
+// XPBD particle system: grids + free agents  
 const GRID_COUNT = 5;
 const GRID_PARTICLE_SIZE = 3;
 const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
@@ -12,30 +12,37 @@ const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
 // Particle physical properties
 const PARTICLE_SIZE = 0.02; // Physical radius of particles
 const PARTICLE_MASS = 1.0; // Normalized particle mass
-const MAX_SPEED = 0.2;
-
-// Boids behavior radii (based on particle size for physical accuracy)
-const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5;
-const ALIGNMENT_RADIUS = PARTICLE_SIZE * 3;
-const COHESION_RADIUS = PARTICLE_SIZE * 5;
 const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
 
-// Force strength multipliers
-const force_multiplier = 0.1;
-const SEPARATION_STRENGTH = force_multiplier * 10;
-const ALIGNMENT_STRENGTH = force_multiplier * 0;
-const COHESION_STRENGTH = force_multiplier * 0.5;
-const SPRING_STRENGTH = force_multiplier * 5.0;
+// XPBD solver parameters
+const XPBD_ITERATIONS = 5; // Constraint solver iterations per timestep
+const XPBD_SUBSTEPS = 1; // Number of substeps per frame
 
-// Spring system parameters
+// Constraint parameters (compliance = 1/(stiffness * dt²))
+const DISTANCE_STIFFNESS = 1000.0;
+const COLLISION_STIFFNESS = 100000.0; // Much stiffer for snappy collisions
+const MOUSE_STIFFNESS = 50000.0;
+
+// Constraint distances
 const SPRING_REST_LENGTH = PARTICLE_SIZE * 1; // Natural spring length between connected particles
-
-// Critical damping calculation: c_critical = 2 * sqrt(k * m)
-const CRITICAL_DAMPING = 2.0 * @sqrt(SPRING_STRENGTH * PARTICLE_MASS);
-const SPRING_DAMPING_COEFFICIENT = CRITICAL_DAMPING * 0.1; // 10% of critical for slight underdamping
-
-const GLOBAL_DAMPING = 0.99; // Air resistance simulation
+const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5; // Minimum distance between particles
 const GRID_SPACING = SPRING_REST_LENGTH * 1.1; // Base spacing between grid particles
+
+// Boids constraint parameters
+const BOIDS_SEPARATION_RADIUS = PARTICLE_SIZE * 3.0; // Separation distance for boids
+const BOIDS_ALIGNMENT_RADIUS = PARTICLE_SIZE * 5.0; // Alignment radius for boids
+const BOIDS_COHESION_RADIUS = PARTICLE_SIZE * 7.0; // Cohesion radius for boids
+const BOIDS_SEPARATION_STIFFNESS = 5000.0;
+const BOIDS_ALIGNMENT_STIFFNESS = 1000.0;
+const BOIDS_COHESION_STIFFNESS = 800.0;
+
+// Air resistance
+const AIR_DAMPING = 0.99;
+const GRAVITY = 9.8; // Gravity acceleration
+
+// Legacy constants for compatibility
+const SPRING_STRENGTH = DISTANCE_STIFFNESS;
+const SEPARATION_STRENGTH = COLLISION_STIFFNESS;
 
 // Spatial partitioning grid for O(n) performance
 const GRID_SIZE = 25;
@@ -46,21 +53,178 @@ const MAX_PARTICLES_PER_CELL = 500;
 const GRID_SCALE = @as(f32, GRID_SIZE) / WORLD_SIZE;
 const WORLD_HALF = WORLD_SIZE / 2.0;
 
-// Spring connection structure
-const Spring = struct {
-    particle_a: u32, // Index of first connected particle
-    particle_b: u32, // Index of second connected particle
-    rest_length: f32, // Natural length of spring
+// XPBD Constraint Types
+const ConstraintType = enum {
+    distance,
+    collision,
+    mouse_spring,
+};
+
+// XPBD Distance Constraint (replaces springs)
+const DistanceConstraint = struct {
+    particle_a: u32,
+    particle_b: u32,
+    rest_length: f32,
+    compliance: f32, // α = 1/(k * dt²)
+    lagrange_multiplier: f32, // λ accumulated during solving
 
     const Self = @This();
 
-    pub fn init(a: u32, b: u32, length: f32) Self {
+    pub fn init(a: u32, b: u32, length: f32, stiffness: f32, dt: f32) Self {
         return Self{
             .particle_a = a,
             .particle_b = b,
             .rest_length = length,
+            .compliance = 1.0 / (stiffness * dt * dt),
+            .lagrange_multiplier = 0.0,
         };
     }
+
+    pub fn evaluate(self: *const Self, positions: []Vec2) f32 {
+        const pa = positions[self.particle_a];
+        const pb = positions[self.particle_b];
+        const dx = pb.x - pa.x;
+        const dy = pb.y - pa.y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        return distance - self.rest_length;
+    }
+
+    pub fn getGradients(self: *const Self, positions: []Vec2) struct { ga: Vec2, gb: Vec2 } {
+        const pa = positions[self.particle_a];
+        const pb = positions[self.particle_b];
+        const dx = pb.x - pa.x;
+        const dy = pb.y - pa.y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        
+        if (distance < 1e-6) {
+            return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 } };
+        }
+        
+        const norm_x = dx / distance;
+        const norm_y = dy / distance;
+        
+        return .{
+            .ga = Vec2{ .x = -norm_x, .y = -norm_y },
+            .gb = Vec2{ .x = norm_x, .y = norm_y },
+        };
+    }
+};
+
+// XPBD Collision Constraint (replaces separation forces)
+const CollisionConstraint = struct {
+    particle_a: u32,
+    particle_b: u32,
+    min_distance: f32,
+    compliance: f32,
+    lagrange_multiplier: f32,
+
+    const Self = @This();
+
+    pub fn init(a: u32, b: u32, min_dist: f32, stiffness: f32, dt: f32) Self {
+        return Self{
+            .particle_a = a,
+            .particle_b = b,
+            .min_distance = min_dist,
+            .compliance = 1.0 / (stiffness * dt * dt),
+            .lagrange_multiplier = 0.0,
+        };
+    }
+
+    pub fn evaluate(self: *const Self, positions: []Vec2) f32 {
+        const pa = positions[self.particle_a];
+        const pb = positions[self.particle_b];
+        const dx = pb.x - pa.x;
+        const dy = pb.y - pa.y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        return @min(0.0, distance - self.min_distance); // Only active when overlapping
+    }
+
+    pub fn getGradients(self: *const Self, positions: []Vec2) struct { ga: Vec2, gb: Vec2 } {
+        const pa = positions[self.particle_a];
+        const pb = positions[self.particle_b];
+        const dx = pb.x - pa.x;
+        const dy = pb.y - pa.y;
+        const distance = @sqrt(dx * dx + dy * dy);
+        
+        if (distance < 1e-6) {
+            return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 } };
+        }
+        
+        const norm_x = dx / distance;
+        const norm_y = dy / distance;
+        
+        return .{
+            .ga = Vec2{ .x = -norm_x, .y = -norm_y },
+            .gb = Vec2{ .x = norm_x, .y = norm_y },
+        };
+    }
+};
+
+// XPBD Boids Constraints (replaces force-based boids)
+const SeparationConstraint = struct {
+    particle_a: u32,
+    particle_b: u32,
+    target_distance: f32, // Desired separation distance
+    compliance: f32,
+    lagrange_multiplier: f32,
+    
+    const Self = @This();
+    
+    pub fn init(a: u32, b: u32, target_dist: f32, stiffness: f32, dt: f32) Self {
+        return Self{
+            .particle_a = a,
+            .particle_b = b,
+            .target_distance = target_dist,
+            .compliance = 1.0 / (stiffness * dt * dt),
+            .lagrange_multiplier = 0.0,
+        };
+    }
+};
+
+const AlignmentConstraint = struct {
+    particle_a: u32,
+    neighbor_particles: [16]u32, // Max neighbors for alignment
+    neighbor_count: u32,
+    compliance: f32,
+    lagrange_multiplier: f32,
+    
+    const Self = @This();
+    
+    pub fn init(a: u32, stiffness: f32, dt: f32) Self {
+        return Self{
+            .particle_a = a,
+            .neighbor_particles = undefined,
+            .neighbor_count = 0,
+            .compliance = 1.0 / (stiffness * dt * dt),
+            .lagrange_multiplier = 0.0,
+        };
+    }
+};
+
+const CohesionConstraint = struct {
+    particle_a: u32,
+    target_x: f32, // Center of mass X
+    target_y: f32, // Center of mass Y
+    compliance: f32,
+    lagrange_multiplier: f32,
+    
+    const Self = @This();
+    
+    pub fn init(a: u32, target_x: f32, target_y: f32, stiffness: f32, dt: f32) Self {
+        return Self{
+            .particle_a = a,
+            .target_x = target_x,
+            .target_y = target_y,
+            .compliance = 1.0 / (stiffness * dt * dt),
+            .lagrange_multiplier = 0.0,
+        };
+    }
+};
+
+// Vector2 helper
+const Vec2 = struct {
+    x: f32,
+    y: f32,
 };
 
 // Particle type enumeration
@@ -69,12 +233,15 @@ const ParticleType = enum {
     free_agent, // Independent Boid
 };
 
-// Particle structure for Boids with spring support
+// XPBD Particle structure  
 const Particle = struct {
     x: f32,
     y: f32,
+    predicted_x: f32, // Position prediction for XPBD
+    predicted_y: f32,
     vx: f32,
     vy: f32,
+    mass: f32,
     particle_type: ParticleType,
     grid_id: u8, // Which grid this particle belongs to (0-4, or 255 for free agents)
 
@@ -84,514 +251,100 @@ const Particle = struct {
         return Self{
             .x = x,
             .y = y,
+            .predicted_x = x,
+            .predicted_y = y,
             .vx = (x * 0.1), // Simple deterministic initial velocity
             .vy = (y * 0.1),
+            .mass = PARTICLE_MASS,
             .particle_type = ptype,
             .grid_id = grid,
         };
     }
 
-    pub fn updateWithSpatialGrid(self: *Self, particle_index: u32, dt: f32) void {
-        // Single-pass optimized Boids calculation with hue-based affinity
-        var sep_x: f32 = 0;
-        var sep_y: f32 = 0;
-        var sep_count: f32 = 0;
-
-        var ali_x: f32 = 0;
-        var ali_y: f32 = 0;
-        var ali_count: f32 = 0;
-
-        var coh_x: f32 = 0;
-        var coh_y: f32 = 0;
-        var coh_count: f32 = 0;
-
-        // Pre-calculate squared radii to avoid sqrt comparisons
-        const sep_radius_sq = SEPARATION_RADIUS * SEPARATION_RADIUS;
-        const ali_radius_sq = ALIGNMENT_RADIUS * ALIGNMENT_RADIUS;
-        const coh_radius_sq = COHESION_RADIUS * COHESION_RADIUS;
-
-        // Get this particle's hue for color-based affinity
-        const my_hue = getParticleHue(particle_index);
-
-        // Check current cell and 8 surrounding cells in single pass
-        const gx = worldToGrid(self.x);
-        const gy = worldToGrid(self.y);
-
-        var dy: i32 = -1;
-        while (dy <= 1) : (dy += 1) {
-            var dx: i32 = -1;
-            while (dx <= 1) : (dx += 1) {
-                const check_x = gx + dx;
-                const check_y = gy + dy;
-
-                if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
-                    const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
-
-                    for (0..cell.count) |i| {
-                        const neighbor_index = cell.particles[i];
-                        if (neighbor_index != particle_index) {
-                            const other = &particles[neighbor_index];
-                            const dist_x = self.x - other.x;
-                            const dist_y = self.y - other.y;
-                            const dist_sq = dist_x * dist_x + dist_y * dist_y;
-
-                            // Calculate hue similarity for color-based affinity
-                            const neighbor_hue = getParticleHue(neighbor_index);
-                            const hue_similarity = getHueSimilarity(my_hue, neighbor_hue);
-
-                            // Separation (closest interactions) - purely distance-based, no color influence
-                            if (dist_sq > 0 and dist_sq < sep_radius_sq) {
-                                const inv_dist = 1.0 / @sqrt(dist_sq);
-                                sep_x += dist_x * inv_dist;
-                                sep_y += dist_y * inv_dist;
-                                sep_count += 1.0;
-                            }
-
-                            // Alignment (medium range) - strongly affected by color affinity
-                            if (dist_sq > 0 and dist_sq < ali_radius_sq) {
-                                const ali_strength = hue_similarity * hue_similarity * hue_similarity; // Cubic preference for tighter grouping
-                                ali_x += other.vx * ali_strength;
-                                ali_y += other.vy * ali_strength;
-                                ali_count += ali_strength;
-                            }
-
-                            // Cohesion (largest range) - very strongly affected by color affinity
-                            if (dist_sq > 0 and dist_sq < coh_radius_sq) {
-                                const coh_strength = hue_similarity * hue_similarity * hue_similarity * hue_similarity; // Quartic preference for very tight color grouping
-                                coh_x += other.x * coh_strength;
-                                coh_y += other.y * coh_strength;
-                                coh_count += coh_strength;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Calculate final forces with color-weighted averages
-        var force_x: f32 = 0;
-        var force_y: f32 = 0;
-
-        // Separation force - direct force application without artificial limit
-        if (sep_count > 0) {
-            sep_x /= sep_count;
-            sep_y /= sep_count;
-
-            const sep_mag = @sqrt(sep_x * sep_x + sep_y * sep_y);
-            if (sep_mag > 0) {
-                force_x += (sep_x / sep_mag) * SEPARATION_STRENGTH;
-                force_y += (sep_y / sep_mag) * SEPARATION_STRENGTH;
-            }
-        }
-
-        // Alignment force
-        if (ali_count > 0) {
-            ali_x /= ali_count;
-            ali_y /= ali_count;
-
-            const ali_mag = @sqrt(ali_x * ali_x + ali_y * ali_y);
-            if (ali_mag > 0) {
-                force_x += (ali_x / ali_mag) * ALIGNMENT_STRENGTH;
-                force_y += (ali_y / ali_mag) * ALIGNMENT_STRENGTH;
-            }
-        }
-
-        // Cohesion force
-        if (coh_count > 0) {
-            coh_x /= coh_count;
-            coh_y /= coh_count;
-
-            coh_x -= self.x; // Seek towards center
-            coh_y -= self.y;
-
-            const coh_mag = @sqrt(coh_x * coh_x + coh_y * coh_y);
-            if (coh_mag > 0) {
-                force_x += (coh_x / coh_mag) * COHESION_STRENGTH;
-                force_y += (coh_y / coh_mag) * COHESION_STRENGTH;
-            }
-        }
-
-        // Semi-implicit Euler integration for better stability
-
-        // Calculate ALL forces first
-        var total_force_x = force_x;
-        var total_force_y = force_y;
-
-        // Add spring forces if this is a grid particle
-        if (self.particle_type == ParticleType.grid_particle) {
-            const spring_force = self.calculateSpringForces(particle_index);
-            total_force_x += spring_force.x;
-            total_force_y += spring_force.y;
-        }
-
-        // Add mouse spring force if this particle is connected to mouse
-        const mouse_force = applyMouseSpringForce(particle_index);
-        total_force_x += mouse_force.x;
-        total_force_y += mouse_force.y;
-
-        // Add damping as a force (proper semi-implicit approach)
-        var damping_factor: f32 = 1.0 - GLOBAL_DAMPING; // Convert damping coefficient to force
-        if (mouse_has_connection and particle_index == mouse_connected_particle) {
-            damping_factor = 0.01; // Less damping for mouse-connected particles
-        }
-
-        total_force_x -= self.vx * damping_factor / dt; // Damping opposes velocity
-        total_force_y -= self.vy * damping_factor / dt;
-
-        // Update velocity FIRST (key of semi-implicit Euler)
-        self.vx += total_force_x * dt;
-        self.vy += total_force_y * dt;
-
-        // Soft speed limit - only apply if velocity is extremely high to prevent instability
-        const speed_sq = self.vx * self.vx + self.vy * self.vy;
-        const max_speed_sq = MAX_SPEED * MAX_SPEED;
-        if (speed_sq > max_speed_sq * 4.0) {
-            const speed = @sqrt(speed_sq);
-            const limit = MAX_SPEED * 2.0;
-            self.vx = (self.vx / speed) * limit;
-            self.vy = (self.vy / speed) * limit;
-        }
-
-        // THEN update position using the new velocity (semi-implicit step)
-        self.x += self.vx * dt;
-        self.y += self.vy * dt;
-
-        // Bounce off edges with damping
+    pub fn predictPosition(self: *Self, dt: f32) void {
+        // Apply air damping to velocity
+        self.vx *= AIR_DAMPING;
+        self.vy *= AIR_DAMPING;
+        
+        // Predict position using current velocity (explicit Euler prediction)
+        self.predicted_x = self.x + self.vx * dt;
+        self.predicted_y = self.y + self.vy * dt;
+        
+        // Handle boundary collision in prediction
         const border = WORLD_SIZE / 2.0;
-        const bounce_force = 0.8;
-
-        if (self.x > border) {
-            self.x = border;
-            self.vx = -@abs(self.vx) * bounce_force;
+        if (self.predicted_x > border) {
+            self.predicted_x = border;
+            self.vx *= -0.8; // Bounce damping
         }
-        if (self.x < -border) {
-            self.x = -border;
-            self.vx = @abs(self.vx) * bounce_force;
+        if (self.predicted_x < -border) {
+            self.predicted_x = -border;
+            self.vx *= -0.8;
         }
-        if (self.y > border) {
-            self.y = border;
-            self.vy = -@abs(self.vy) * bounce_force;
+        if (self.predicted_y > border) {
+            self.predicted_y = border;
+            self.vy *= -0.8;
         }
-        if (self.y < -border) {
-            self.y = -border;
-            self.vy = @abs(self.vy) * bounce_force;
+        if (self.predicted_y < -border) {
+            self.predicted_y = -border;
+            self.vy *= -0.8;
         }
     }
 
-    // Calculate spring forces with proper damping
-    fn calculateSpringForces(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
-        var total_force_x: f32 = 0;
-        var total_force_y: f32 = 0;
-
-        // Use connection lookup table instead of iterating all springs
-        const connection_count = particle_connection_counts[particle_index];
-
-        for (0..connection_count) |i| {
-            const spring_index = particle_connections[particle_index][i];
-            const spring = &springs[spring_index];
-
-            // Determine which particle is the other end of the spring
-            const other_index = if (spring.particle_a == particle_index) spring.particle_b else spring.particle_a;
-            const other = &particles[other_index];
-
-            const dx = other.x - self.x;
-            const dy = other.y - self.y;
-            const distance = @sqrt(dx * dx + dy * dy);
-
-            if (distance > 0) {
-                // Spring force: F = k * (distance - rest_length)
-                const displacement = distance - spring.rest_length;
-                const spring_force = SPRING_STRENGTH * displacement;
-
-                // Damping force: F = -b * relative_velocity
-                const relative_vx = other.vx - self.vx;
-                const relative_vy = other.vy - self.vy;
-                const norm_x = dx / distance;
-                const norm_y = dy / distance;
-
-                // Project relative velocity onto spring direction
-                const relative_velocity_along_spring = relative_vx * norm_x + relative_vy * norm_y;
-                const damping_force = SPRING_DAMPING_COEFFICIENT * relative_velocity_along_spring;
-
-                // Total force = spring + damping
-                const total_force_magnitude = spring_force + damping_force;
-
-                total_force_x += total_force_magnitude * norm_x;
-                total_force_y += total_force_magnitude * norm_y;
-            }
-        }
-
-        return .{ .x = total_force_x, .y = total_force_y };
+    pub fn updateFromPrediction(self: *Self, dt: f32) void {
+        // Update velocity based on position correction
+        self.vx = (self.predicted_x - self.x) / dt;
+        self.vy = (self.predicted_y - self.y) / dt;
+        
+        // Update position
+        self.x = self.predicted_x;
+        self.y = self.predicted_y;
     }
 
-    fn separate(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
-        var steer_x: f32 = 0;
-        var steer_y: f32 = 0;
-        var count: i32 = 0;
-
-        for (neighbors) |other| {
-            const dx = self.x - other.x;
-            const dy = self.y - other.y;
-            const dist = @sqrt(dx * dx + dy * dy);
-
-            if (dist > 0 and dist < SEPARATION_RADIUS) {
-                steer_x += dx / dist;
-                steer_y += dy / dist;
-                count += 1;
-            }
+    pub fn applyBoundaryConstraints(self: *Self) void {
+        // Simple boundary constraints for XPBD
+        const border = WORLD_SIZE / 2.0;
+        
+        if (self.predicted_x > border) {
+            self.predicted_x = border;
         }
-
-        if (count > 0) {
-            steer_x /= @as(f32, @floatFromInt(count));
-            steer_y /= @as(f32, @floatFromInt(count));
-
-            // Normalize and scale
-            const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
-            if (mag > 0) {
-                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
-                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
-            }
+        if (self.predicted_x < -border) {
+            self.predicted_x = -border;
         }
-
-        return .{ .x = steer_x, .y = steer_y };
-    }
-
-    fn alignment(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
-        var sum_x: f32 = 0;
-        var sum_y: f32 = 0;
-        var count: i32 = 0;
-
-        for (neighbors) |other| {
-            const dx = self.x - other.x;
-            const dy = self.y - other.y;
-            const dist = @sqrt(dx * dx + dy * dy);
-
-            if (dist > 0 and dist < ALIGNMENT_RADIUS) {
-                sum_x += other.vx;
-                sum_y += other.vy;
-                count += 1;
-            }
+        if (self.predicted_y > border) {
+            self.predicted_y = border;
         }
-
-        if (count > 0) {
-            sum_x /= @as(f32, @floatFromInt(count));
-            sum_y /= @as(f32, @floatFromInt(count));
-
-            // Normalize and scale
-            const mag = @sqrt(sum_x * sum_x + sum_y * sum_y);
-            if (mag > 0) {
-                sum_x = (sum_x / mag) * ALIGNMENT_STRENGTH;
-                sum_y = (sum_y / mag) * ALIGNMENT_STRENGTH;
-            }
+        if (self.predicted_y < -border) {
+            self.predicted_y = -border;
         }
-
-        return .{ .x = sum_x, .y = sum_y };
-    }
-
-    fn cohesion(self: *const Self, neighbors: []const Particle) struct { x: f32, y: f32 } {
-        var sum_x: f32 = 0;
-        var sum_y: f32 = 0;
-        var count: i32 = 0;
-
-        for (neighbors) |other| {
-            const dx = self.x - other.x;
-            const dy = self.y - other.y;
-            const dist = @sqrt(dx * dx + dy * dy);
-
-            if (dist > 0 and dist < COHESION_RADIUS) {
-                sum_x += other.x;
-                sum_y += other.y;
-                count += 1;
-            }
-        }
-
-        if (count > 0) {
-            sum_x /= @as(f32, @floatFromInt(count));
-            sum_y /= @as(f32, @floatFromInt(count));
-
-            // Seek towards center
-            var steer_x = sum_x - self.x;
-            var steer_y = sum_y - self.y;
-
-            // Normalize and scale
-            const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
-            if (mag > 0) {
-                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
-                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
-            }
-
-            return .{ .x = steer_x, .y = steer_y };
-        }
-
-        return .{ .x = 0, .y = 0 };
-    }
-
-    // Spatial grid versions of Boids functions for O(n) performance
-    fn separateFromGrid(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
-        var steer_x: f32 = 0;
-        var steer_y: f32 = 0;
-        var count: i32 = 0;
-
-        // Check current cell and 8 surrounding cells
-        const gx = worldToGrid(self.x);
-        const gy = worldToGrid(self.y);
-
-        var dy: i32 = -1;
-        while (dy <= 1) : (dy += 1) {
-            var dx: i32 = -1;
-            while (dx <= 1) : (dx += 1) {
-                const check_x = gx + dx;
-                const check_y = gy + dy;
-
-                if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
-                    const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
-
-                    for (0..cell.count) |i| {
-                        const neighbor_index = cell.particles[i];
-                        if (neighbor_index != particle_index) {
-                            const other = &particles[neighbor_index];
-                            const dist_x = self.x - other.x;
-                            const dist_y = self.y - other.y;
-                            const dist = @sqrt(dist_x * dist_x + dist_y * dist_y);
-
-                            if (dist > 0 and dist < SEPARATION_RADIUS) {
-                                steer_x += dist_x / dist;
-                                steer_y += dist_y / dist;
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (count > 0) {
-            steer_x /= @as(f32, @floatFromInt(count));
-            steer_y /= @as(f32, @floatFromInt(count));
-
-            // Normalize and scale
-            const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
-            if (mag > 0) {
-                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
-                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
-            }
-        }
-
-        return .{ .x = steer_x, .y = steer_y };
-    }
-
-    fn alignmentFromGrid(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
-        var sum_x: f32 = 0;
-        var sum_y: f32 = 0;
-        var count: i32 = 0;
-
-        // Check current cell and 8 surrounding cells
-        const gx = worldToGrid(self.x);
-        const gy = worldToGrid(self.y);
-
-        var dy: i32 = -1;
-        while (dy <= 1) : (dy += 1) {
-            var dx: i32 = -1;
-            while (dx <= 1) : (dx += 1) {
-                const check_x = gx + dx;
-                const check_y = gy + dy;
-
-                if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
-                    const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
-
-                    for (0..cell.count) |i| {
-                        const neighbor_index = cell.particles[i];
-                        if (neighbor_index != particle_index) {
-                            const other = &particles[neighbor_index];
-                            const dist_x = self.x - other.x;
-                            const dist_y = self.y - other.y;
-                            const dist = @sqrt(dist_x * dist_x + dist_y * dist_y);
-
-                            if (dist > 0 and dist < ALIGNMENT_RADIUS) {
-                                sum_x += other.vx;
-                                sum_y += other.vy;
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (count > 0) {
-            sum_x /= @as(f32, @floatFromInt(count));
-            sum_y /= @as(f32, @floatFromInt(count));
-
-            // Normalize and scale
-            const mag = @sqrt(sum_x * sum_x + sum_y * sum_y);
-            if (mag > 0) {
-                sum_x = (sum_x / mag) * ALIGNMENT_STRENGTH;
-                sum_y = (sum_y / mag) * ALIGNMENT_STRENGTH;
-            }
-        }
-
-        return .{ .x = sum_x, .y = sum_y };
-    }
-
-    fn cohesionFromGrid(self: *const Self, particle_index: u32) struct { x: f32, y: f32 } {
-        var sum_x: f32 = 0;
-        var sum_y: f32 = 0;
-        var count: i32 = 0;
-
-        // Check current cell and 8 surrounding cells
-        const gx = worldToGrid(self.x);
-        const gy = worldToGrid(self.y);
-
-        var dy: i32 = -1;
-        while (dy <= 1) : (dy += 1) {
-            var dx: i32 = -1;
-            while (dx <= 1) : (dx += 1) {
-                const check_x = gx + dx;
-                const check_y = gy + dy;
-
-                if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
-                    const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
-
-                    for (0..cell.count) |i| {
-                        const neighbor_index = cell.particles[i];
-                        if (neighbor_index != particle_index) {
-                            const other = &particles[neighbor_index];
-                            const dist_x = self.x - other.x;
-                            const dist_y = self.y - other.y;
-                            const dist = @sqrt(dist_x * dist_x + dist_y * dist_y);
-
-                            if (dist > 0 and dist < COHESION_RADIUS) {
-                                sum_x += other.x;
-                                sum_y += other.y;
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (count > 0) {
-            sum_x /= @as(f32, @floatFromInt(count));
-            sum_y /= @as(f32, @floatFromInt(count));
-
-            // Seek towards center
-            var steer_x = sum_x - self.x;
-            var steer_y = sum_y - self.y;
-
-            // Normalize and scale
-            const mag = @sqrt(steer_x * steer_x + steer_y * steer_y);
-            if (mag > 0) {
-                steer_x = (steer_x / mag) * SEPARATION_STRENGTH;
-                steer_y = (steer_y / mag) * SEPARATION_STRENGTH;
-            }
-
-            return .{ .x = steer_x, .y = steer_y };
-        }
-
-        return .{ .x = 0, .y = 0 };
     }
 };
+
+// XPBD constraint arrays
+const MAX_DISTANCE_CONSTRAINTS = GRID_COUNT * (GRID_PARTICLE_SIZE - 1) * GRID_PARTICLE_SIZE * 2;
+const MAX_COLLISION_CONSTRAINTS = 10000; // Dynamic collision detection
+
+var distance_constraints: [MAX_DISTANCE_CONSTRAINTS]DistanceConstraint = undefined;
+var distance_constraint_count: u32 = 0;
+
+var collision_constraints: [MAX_COLLISION_CONSTRAINTS]CollisionConstraint = undefined;
+var collision_constraint_count: u32 = 0;
+
+// Mouse constraint
+var mouse_constraint: ?DistanceConstraint = null;
+
+// Boids constraint arrays
+const MAX_BOIDS_SEPARATION_CONSTRAINTS = FREE_AGENT_COUNT * 16; // Max 16 neighbors per boid
+const MAX_BOIDS_ALIGNMENT_CONSTRAINTS = FREE_AGENT_COUNT; // One per free agent
+const MAX_BOIDS_COHESION_CONSTRAINTS = FREE_AGENT_COUNT; // One per free agent
+
+var boids_separation_constraints: [MAX_BOIDS_SEPARATION_CONSTRAINTS]SeparationConstraint = undefined;
+var boids_separation_constraint_count: u32 = 0;
+
+var boids_alignment_constraints: [MAX_BOIDS_ALIGNMENT_CONSTRAINTS]AlignmentConstraint = undefined;
+var boids_alignment_constraint_count: u32 = 0;
+
+var boids_cohesion_constraints: [MAX_BOIDS_COHESION_CONSTRAINTS]CohesionConstraint = undefined;
+var boids_cohesion_constraint_count: u32 = 0;
 
 // Spatial grid cell structure
 const GridCell = struct {
@@ -629,6 +382,22 @@ var particles_initialized = false;
 
 // Spring system - maximum springs for 5 16x16 grids with 4-connectivity
 const MAX_SPRINGS = GRID_COUNT * (GRID_PARTICLE_SIZE - 1) * GRID_PARTICLE_SIZE * 2; // Horizontal + vertical springs
+
+// Legacy Spring structure for backward compatibility
+const Spring = struct {
+    particle_a: u32,
+    particle_b: u32,
+    rest_length: f32,
+    
+    pub fn init(particle_a: u32, particle_b: u32, rest_length: f32) Spring {
+        return Spring{
+            .particle_a = particle_a,
+            .particle_b = particle_b,
+            .rest_length = rest_length,
+        };
+    }
+};
+
 var springs: [MAX_SPRINGS]Spring = undefined;
 var spring_count: u32 = 0;
 var springs_initialized = false;
@@ -841,31 +610,486 @@ fn findClosestParticle(target_x: f32, target_y: f32) u32 {
     return closest_index;
 }
 
-// Apply mouse spring force to the connected particle
-fn applyMouseSpringForce(particle_index: u32) struct { x: f32, y: f32 } {
-    if (!mouse_has_connection or particle_index != mouse_connected_particle) {
-        return .{ .x = 0.0, .y = 0.0 };
+// XPBD constraint generation - creates distance, collision, and boids constraints
+fn generateConstraints(dt: f32) void {
+    distance_constraint_count = 0;
+    collision_constraint_count = 0;
+    boids_separation_constraint_count = 0;
+    boids_alignment_constraint_count = 0;
+    boids_cohesion_constraint_count = 0;
+    
+    // Generate distance constraints from springs
+    for (0..spring_count) |i| {
+        const spring = &springs[i];
+        if (distance_constraint_count < MAX_DISTANCE_CONSTRAINTS) {
+            // Calculate compliance: α = 1/(k * dt²)
+            const spring_compliance = 1.0 / (SPRING_STRENGTH * dt * dt);
+            
+            distance_constraints[distance_constraint_count] = DistanceConstraint{
+                .particle_a = spring.particle_a,
+                .particle_b = spring.particle_b,
+                .rest_length = spring.rest_length,
+                .compliance = spring_compliance,
+                .lagrange_multiplier = 0.0,
+            };
+            distance_constraint_count += 1;
+        }
     }
+    
+    // Generate mouse constraint if active
+    if (mouse_has_connection) {
+        mouse_constraint = DistanceConstraint{
+            .particle_a = mouse_connected_particle,
+            .particle_b = 0, // Dummy particle index (mouse is external)
+            .rest_length = 0.0, // Pull directly to mouse
+            .compliance = 1.0 / (SPRING_STRENGTH * 500.0 * dt * dt), // Very strong
+            .lagrange_multiplier = 0.0,
+        };
+    } else {
+        mouse_constraint = null;
+    }
+    
+    // Generate collision constraints using spatial grid
+    populateGrid();
+    for (0..PARTICLE_COUNT) |i| {
+        generateCollisionConstraintsForParticle(@intCast(i), dt);
+    }
+    
+    // Generate boids constraints for free agents only
+    for (TOTAL_GRID_PARTICLES..PARTICLE_COUNT) |i| {
+        generateBoidsConstraintsForParticle(@intCast(i), dt);
+    }
+}
 
+// Generate collision constraints for a single particle using spatial grid
+fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
     const particle = &particles[particle_index];
-    const dx = mouse_x - particle.x;
-    const dy = mouse_y - particle.y;
-    const distance = @sqrt(dx * dx + dy * dy);
+    
+    // Check current cell and 8 surrounding cells
+    const gx = worldToGrid(particle.predicted_x);
+    const gy = worldToGrid(particle.predicted_y);
 
-    if (distance > 0) {
-        const mouse_spring_strength = SPRING_STRENGTH * 500.0; // Extremely strong - 500x regular springs
-        const mouse_spring_rest_length: f32 = 0.0; // Pull directly to mouse
+    var dy: i32 = -1;
+    while (dy <= 1) : (dy += 1) {
+        var dx: i32 = -1;
+        while (dx <= 1) : (dx += 1) {
+            const check_x = gx + dx;
+            const check_y = gy + dy;
 
-        const displacement = distance - mouse_spring_rest_length;
-        const force_magnitude = mouse_spring_strength * displacement;
+            if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
+                const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
 
-        const norm_x = dx / distance;
-        const norm_y = dy / distance;
-
-        return .{ .x = force_magnitude * norm_x, .y = force_magnitude * norm_y };
+                for (0..cell.count) |i| {
+                    const neighbor_index = cell.particles[i];
+                    if (neighbor_index != particle_index and neighbor_index < particle_index) { // Avoid duplicates
+                        const other = &particles[neighbor_index];
+                        const dx_pred = particle.predicted_x - other.predicted_x;
+                        const dy_pred = particle.predicted_y - other.predicted_y;
+                        const dist_sq = dx_pred * dx_pred + dy_pred * dy_pred;
+                        
+                        const min_distance = PARTICLE_SIZE * 2.2; // Slightly larger separation for better collision detection
+                        if (dist_sq < min_distance * min_distance) {
+                            if (collision_constraint_count < MAX_COLLISION_CONSTRAINTS) {
+                                // High stiffness for collision constraints
+                                const collision_compliance = 1.0 / (SEPARATION_STRENGTH * dt * dt);
+                                
+                                collision_constraints[collision_constraint_count] = CollisionConstraint{
+                                    .particle_a = particle_index,
+                                    .particle_b = neighbor_index,
+                                    .min_distance = min_distance,
+                                    .compliance = collision_compliance,
+                                    .lagrange_multiplier = 0.0,
+                                };
+                                collision_constraint_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+}
 
-    return .{ .x = 0.0, .y = 0.0 };
+// Generate boids constraints for a single free agent particle
+fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
+    const particle = &particles[particle_index];
+    
+    // Only apply to free agents
+    if (particle.particle_type != ParticleType.free_agent) return;
+    
+    var neighbors: [16]u32 = undefined;
+    var neighbor_count: u32 = 0;
+    var neighbor_positions_x: f32 = 0;
+    var neighbor_positions_y: f32 = 0;
+    var neighbor_velocities_x: f32 = 0;
+    var neighbor_velocities_y: f32 = 0;
+    
+    // Check current cell and surrounding cells for neighbors
+    const gx = worldToGrid(particle.predicted_x);
+    const gy = worldToGrid(particle.predicted_y);
+
+    var dy: i32 = -1;
+    while (dy <= 1) : (dy += 1) {
+        var dx: i32 = -1;
+        while (dx <= 1) : (dx += 1) {
+            const check_x = gx + dx;
+            const check_y = gy + dy;
+
+            if (check_x >= 0 and check_x < GRID_SIZE and check_y >= 0 and check_y < GRID_SIZE) {
+                const cell = &spatial_grid[@intCast(check_x)][@intCast(check_y)];
+
+                for (0..cell.count) |i| {
+                    const neighbor_index = cell.particles[i];
+                    if (neighbor_index != particle_index and neighbor_index >= TOTAL_GRID_PARTICLES) { // Only other free agents
+                        const other = &particles[neighbor_index];
+                        const dx_pred = particle.predicted_x - other.predicted_x;
+                        const dy_pred = particle.predicted_y - other.predicted_y;
+                        const dist_sq = dx_pred * dx_pred + dy_pred * dy_pred;
+                        
+                        // Check if within boids interaction range (use largest radius)
+                        const max_radius_sq = BOIDS_COHESION_RADIUS * BOIDS_COHESION_RADIUS;
+                        if (dist_sq < max_radius_sq and neighbor_count < 16) {
+                            neighbors[neighbor_count] = neighbor_index;
+                            neighbor_count += 1;
+                            
+                            // Accumulate for center of mass and average velocity
+                            neighbor_positions_x += other.predicted_x;
+                            neighbor_positions_y += other.predicted_y;
+                            neighbor_velocities_x += other.vx;
+                            neighbor_velocities_y += other.vy;
+                            
+                            // Generate separation constraints for close neighbors
+                            const sep_radius_sq = BOIDS_SEPARATION_RADIUS * BOIDS_SEPARATION_RADIUS;
+                            if (dist_sq < sep_radius_sq and boids_separation_constraint_count < MAX_BOIDS_SEPARATION_CONSTRAINTS) {
+                                const separation_compliance = 1.0 / (BOIDS_SEPARATION_STIFFNESS * dt * dt);
+                                
+                                boids_separation_constraints[boids_separation_constraint_count] = SeparationConstraint{
+                                    .particle_a = particle_index,
+                                    .particle_b = neighbor_index,
+                                    .target_distance = BOIDS_SEPARATION_RADIUS,
+                                    .compliance = separation_compliance,
+                                    .lagrange_multiplier = 0.0,
+                                };
+                                boids_separation_constraint_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Generate alignment constraint if we have neighbors
+    if (neighbor_count > 0 and boids_alignment_constraint_count < MAX_BOIDS_ALIGNMENT_CONSTRAINTS) {
+        boids_alignment_constraints[boids_alignment_constraint_count] = AlignmentConstraint.init(
+            particle_index, 
+            BOIDS_ALIGNMENT_STIFFNESS, 
+            dt
+        );
+        
+        // Store neighbor information
+        var constraint = &boids_alignment_constraints[boids_alignment_constraint_count];
+        constraint.neighbor_count = @min(neighbor_count, 16);
+        for (0..constraint.neighbor_count) |i| {
+            constraint.neighbor_particles[i] = neighbors[i];
+        }
+        boids_alignment_constraint_count += 1;
+    }
+    
+    // Generate cohesion constraint if we have neighbors
+    if (neighbor_count > 0 and boids_cohesion_constraint_count < MAX_BOIDS_COHESION_CONSTRAINTS) {
+        const center_x = neighbor_positions_x / @as(f32, @floatFromInt(neighbor_count));
+        const center_y = neighbor_positions_y / @as(f32, @floatFromInt(neighbor_count));
+        
+        boids_cohesion_constraints[boids_cohesion_constraint_count] = CohesionConstraint.init(
+            particle_index,
+            center_x,
+            center_y,
+            BOIDS_COHESION_STIFFNESS,
+            dt
+        );
+        boids_cohesion_constraint_count += 1;
+    }
+}
+
+// XPBD constraint solver - solves all constraints using Lagrange multipliers
+fn solveConstraints(dt: f32) void {
+    // Solve distance constraints
+    for (0..distance_constraint_count) |i| {
+        solveDistanceConstraint(&distance_constraints[i], dt);
+    }
+    
+    // Solve mouse constraint if active
+    if (mouse_constraint) |*constraint| {
+        solveMouseConstraint(constraint, dt);
+    }
+    
+    // Solve collision constraints
+    for (0..collision_constraint_count) |i| {
+        solveCollisionConstraint(&collision_constraints[i], dt);
+    }
+    
+    // Solve boids constraints
+    for (0..boids_separation_constraint_count) |i| {
+        solveSeparationConstraint(&boids_separation_constraints[i], dt);
+    }
+    
+    for (0..boids_alignment_constraint_count) |i| {
+        solveAlignmentConstraint(&boids_alignment_constraints[i], dt);
+    }
+    
+    for (0..boids_cohesion_constraint_count) |i| {
+        solveCohesionConstraint(&boids_cohesion_constraints[i], dt);
+    }
+}
+
+// Solve only collision constraints for extra snappy collision response
+fn solveCollisionConstraintsOnly(dt: f32) void {
+    // Solve collision constraints only
+    for (0..collision_constraint_count) |i| {
+        solveCollisionConstraint(&collision_constraints[i], dt);
+    }
+}
+
+// Solve individual distance constraint using XPBD
+fn solveDistanceConstraint(constraint: *DistanceConstraint, dt: f32) void {
+    const particle_a = &particles[constraint.particle_a];
+    const particle_b = &particles[constraint.particle_b];
+    
+    // Calculate constraint value C(x) = |x_a - x_b| - rest_length
+    const dx = particle_a.predicted_x - particle_b.predicted_x;
+    const dy = particle_a.predicted_y - particle_b.predicted_y;
+    const current_distance = @sqrt(dx * dx + dy * dy);
+    
+    if (current_distance < 0.001) return; // Avoid division by zero
+    
+    const constraint_value = current_distance - constraint.rest_length;
+    
+    // Calculate constraint gradient ∇C
+    const grad_x = dx / current_distance;
+    const grad_y = dy / current_distance;
+    
+    // Calculate denominator for Lagrange multiplier
+    // w_a * |∇C_a|² + w_b * |∇C_b|² + α/dt²
+    const w_a = 1.0 / particle_a.mass;
+    const w_b = 1.0 / particle_b.mass;
+    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
+    const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
+    
+    if (denominator < 0.001) return; // Avoid division by zero
+    
+    // Calculate delta Lagrange multiplier
+    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
+    
+    // Update Lagrange multiplier
+    constraint.lagrange_multiplier += delta_lambda;
+    
+    // Apply position corrections
+    const correction_a_x = w_a * delta_lambda * grad_x;
+    const correction_a_y = w_a * delta_lambda * grad_y;
+    const correction_b_x = -w_b * delta_lambda * grad_x;
+    const correction_b_y = -w_b * delta_lambda * grad_y;
+    
+    // Update predicted positions
+    particles[constraint.particle_a].predicted_x += correction_a_x;
+    particles[constraint.particle_a].predicted_y += correction_a_y;
+    particles[constraint.particle_b].predicted_x += correction_b_x;
+    particles[constraint.particle_b].predicted_y += correction_b_y;
+}
+
+// Solve mouse constraint (particle to mouse position)
+fn solveMouseConstraint(constraint: *DistanceConstraint, dt: f32) void {
+    const particle = &particles[constraint.particle_a];
+    
+    // Calculate constraint value C(x) = |x_particle - x_mouse| - rest_length
+    const dx = particle.predicted_x - mouse_x;
+    const dy = particle.predicted_y - mouse_y;
+    const current_distance = @sqrt(dx * dx + dy * dy);
+    
+    if (current_distance < 0.001) return; // Avoid division by zero
+    
+    const constraint_value = current_distance - constraint.rest_length;
+    
+    // Calculate constraint gradient ∇C
+    const grad_x = dx / current_distance;
+    const grad_y = dy / current_distance;
+    
+    // Mouse has infinite mass, so only particle moves
+    const w_particle = 1.0 / particle.mass;
+    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
+    const denominator = w_particle * grad_length_sq + constraint.compliance / (dt * dt);
+    
+    if (denominator < 0.001) return; // Avoid division by zero
+    
+    // Calculate delta Lagrange multiplier
+    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
+    
+    // Update Lagrange multiplier
+    constraint.lagrange_multiplier += delta_lambda;
+    
+    // Apply position correction only to particle
+    const correction_x = w_particle * delta_lambda * grad_x;
+    const correction_y = w_particle * delta_lambda * grad_y;
+    
+    // Update predicted position
+    particles[constraint.particle_a].predicted_x += correction_x;
+    particles[constraint.particle_a].predicted_y += correction_y;
+}
+
+// Solve individual collision constraint using XPBD
+fn solveCollisionConstraint(constraint: *CollisionConstraint, dt: f32) void {
+    const particle_a = &particles[constraint.particle_a];
+    const particle_b = &particles[constraint.particle_b];
+    
+    // Calculate constraint value C(x) = min_distance - |x_a - x_b|
+    const dx = particle_a.predicted_x - particle_b.predicted_x;
+    const dy = particle_a.predicted_y - particle_b.predicted_y;
+    const current_distance = @sqrt(dx * dx + dy * dy);
+    
+    if (current_distance < 0.001) return; // Avoid division by zero
+    
+    const constraint_value = constraint.min_distance - current_distance;
+    
+    // Only solve if constraint is violated (particles too close)
+    if (constraint_value <= 0) return;
+    
+    // Calculate constraint gradient ∇C (negative because we subtract distance)
+    const grad_x = -dx / current_distance;
+    const grad_y = -dy / current_distance;
+    
+    // Calculate denominator for Lagrange multiplier
+    const w_a = 1.0 / particle_a.mass;
+    const w_b = 1.0 / particle_b.mass;
+    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
+    const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
+    
+    if (denominator < 0.001) return; // Avoid division by zero
+    
+    // Calculate delta Lagrange multiplier
+    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
+    
+    // Update Lagrange multiplier
+    constraint.lagrange_multiplier += delta_lambda;
+    
+    // Apply position corrections
+    const correction_a_x = w_a * delta_lambda * grad_x;
+    const correction_a_y = w_a * delta_lambda * grad_y;
+    const correction_b_x = -w_b * delta_lambda * grad_x;
+    const correction_b_y = -w_b * delta_lambda * grad_y;
+    
+    // Update predicted positions
+    particles[constraint.particle_a].predicted_x += correction_a_x;
+    particles[constraint.particle_a].predicted_y += correction_a_y;
+    particles[constraint.particle_b].predicted_x += correction_b_x;
+    particles[constraint.particle_b].predicted_y += correction_b_y;
+}
+
+// Solve boids separation constraint (keep particles apart)
+fn solveSeparationConstraint(constraint: *SeparationConstraint, dt: f32) void {
+    const particle_a = &particles[constraint.particle_a];
+    const particle_b = &particles[constraint.particle_b];
+    
+    // Calculate constraint value C(x) = target_distance - |x_a - x_b|
+    const dx = particle_a.predicted_x - particle_b.predicted_x;
+    const dy = particle_a.predicted_y - particle_b.predicted_y;
+    const current_distance = @sqrt(dx * dx + dy * dy);
+    
+    if (current_distance < 0.001) return; // Avoid division by zero
+    
+    // Only enforce if particles are too close (current_distance < target_distance)
+    if (current_distance >= constraint.target_distance) return;
+    
+    const constraint_value = constraint.target_distance - current_distance;
+    
+    // Calculate constraint gradient ∇C (negative because we subtract distance)
+    const grad_x = -dx / current_distance;
+    const grad_y = -dy / current_distance;
+    
+    // Calculate denominator for Lagrange multiplier
+    const w_a = 1.0 / particle_a.mass;
+    const w_b = 1.0 / particle_b.mass;
+    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
+    const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
+    
+    if (denominator < 0.001) return; // Avoid division by zero
+    
+    // Calculate delta Lagrange multiplier
+    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
+    
+    // Update Lagrange multiplier
+    constraint.lagrange_multiplier += delta_lambda;
+    
+    // Apply position corrections
+    const correction_a_x = w_a * delta_lambda * grad_x;
+    const correction_a_y = w_a * delta_lambda * grad_y;
+    const correction_b_x = -w_b * delta_lambda * grad_x;
+    const correction_b_y = -w_b * delta_lambda * grad_y;
+    
+    // Update predicted positions
+    particles[constraint.particle_a].predicted_x += correction_a_x;
+    particles[constraint.particle_a].predicted_y += correction_a_y;
+    particles[constraint.particle_b].predicted_x += correction_b_x;
+    particles[constraint.particle_b].predicted_y += correction_b_y;
+}
+
+// Solve alignment constraint (align velocities with neighbors)
+fn solveAlignmentConstraint(constraint: *AlignmentConstraint, dt: f32) void {
+    const particle = &particles[constraint.particle_a];
+    
+    if (constraint.neighbor_count == 0) return;
+    
+    // Calculate average neighbor velocity
+    var avg_vx: f32 = 0;
+    var avg_vy: f32 = 0;
+    for (0..constraint.neighbor_count) |i| {
+        const neighbor = &particles[constraint.neighbor_particles[i]];
+        avg_vx += neighbor.vx;
+        avg_vy += neighbor.vy;
+    }
+    avg_vx /= @as(f32, @floatFromInt(constraint.neighbor_count));
+    avg_vy /= @as(f32, @floatFromInt(constraint.neighbor_count));
+    
+    // Apply velocity alignment as position correction (XPBD style)
+    const velocity_diff_x = avg_vx - particle.vx;
+    const velocity_diff_y = avg_vy - particle.vy;
+    
+    // Convert velocity difference to position correction
+    const alignment_strength = 1.0 / (constraint.compliance + dt * dt);
+    const correction_x = velocity_diff_x * dt * alignment_strength * 0.01; // Small factor for stability
+    const correction_y = velocity_diff_y * dt * alignment_strength * 0.01;
+    
+    // Apply position correction
+    particles[constraint.particle_a].predicted_x += correction_x;
+    particles[constraint.particle_a].predicted_y += correction_y;
+}
+
+// Solve cohesion constraint (attract to center of mass)
+fn solveCohesionConstraint(constraint: *CohesionConstraint, dt: f32) void {
+    const particle = &particles[constraint.particle_a];
+    
+    // Calculate constraint value C(x) = |x_particle - center_of_mass|
+    const dx = particle.predicted_x - constraint.target_x;
+    const dy = particle.predicted_y - constraint.target_y;
+    const distance_to_center = @sqrt(dx * dx + dy * dy);
+    
+    if (distance_to_center < 0.001) return; // Already at center
+    
+    // We want to minimize distance to center, so constraint is just the distance
+    const constraint_value = distance_to_center;
+    
+    // Calculate constraint gradient ∇C
+    const grad_x = dx / distance_to_center;
+    const grad_y = dy / distance_to_center;
+    
+    // Calculate correction (simple attraction)  
+    const cohesion_strength = 1.0 / (constraint.compliance + dt * dt);
+    
+    const correction_x = -grad_x * constraint_value * cohesion_strength * 0.01; // Small factor for stability
+    const correction_y = -grad_y * constraint_value * cohesion_strength * 0.01;
+    
+    // Apply position correction
+    particles[constraint.particle_a].predicted_x += correction_x;
+    particles[constraint.particle_a].predicted_y += correction_y;
 }
 
 export fn init() void {
@@ -909,13 +1133,37 @@ export fn reset() void {
 export fn update_particles(dt: f32) void {
     if (!particles_initialized) return;
 
-    // Populate spatial grid with current particle positions
-    populateGrid();
+    // XPBD Integration Steps:
+    // 1. Position prediction (using velocity)
+    // 2. Constraint generation and solving
+    // 3. Velocity update from position changes
+    // 4. Position finalization
 
-    // Update each particle using spatial grid for O(n) performance
+    // Step 1: Predict positions for all particles
     for (0..PARTICLE_COUNT) |i| {
         var particle = &particles[i];
-        particle.updateWithSpatialGrid(@intCast(i), dt);
+        particle.predictPosition(dt);
+    }
+
+    // Step 2: Generate constraints and solve them iteratively
+    generateConstraints(dt);
+    
+    // Solve constraints for multiple iterations for stability
+    const solver_iterations = 5; // More iterations for better stability
+    for (0..solver_iterations) |_| {
+        solveConstraints(dt);
+    }
+    
+    // Extra collision-only passes for snappy collision response
+    const collision_passes = 3;
+    for (0..collision_passes) |_| {
+        solveCollisionConstraintsOnly(dt);
+    }
+    
+    // Step 3: Update velocities and positions from predictions
+    for (0..PARTICLE_COUNT) |i| {
+        var particle = &particles[i];
+        particle.updateFromPrediction(dt);
     }
 }
 
