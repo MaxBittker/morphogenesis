@@ -1,7 +1,7 @@
 const std = @import("std");
 const math = std.math;
 
-// XPBD particle system: grids + free agents  
+// XPBD particle system: grids + free agents
 const GRID_COUNT = 5;
 const GRID_PARTICLE_SIZE = 3;
 const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
@@ -19,7 +19,7 @@ const XPBD_ITERATIONS = 5; // Constraint solver iterations per timestep
 const XPBD_SUBSTEPS = 1; // Number of substeps per frame
 
 // Constraint parameters (compliance = 1/(stiffness * dt²))
-const DISTANCE_STIFFNESS = 1000.0;
+const DISTANCE_STIFFNESS = 20000.0;
 const COLLISION_STIFFNESS = 100000.0; // Much stiffer for snappy collisions
 const MOUSE_STIFFNESS = 50000.0;
 
@@ -34,7 +34,7 @@ const BOIDS_ALIGNMENT_RADIUS = PARTICLE_SIZE * 5.0; // Alignment radius for boid
 const BOIDS_COHESION_RADIUS = PARTICLE_SIZE * 7.0; // Cohesion radius for boids
 const BOIDS_SEPARATION_STIFFNESS = 5000.0;
 const BOIDS_ALIGNMENT_STIFFNESS = 1000.0;
-const BOIDS_COHESION_STIFFNESS = 800.0;
+const BOIDS_COHESION_STIFFNESS = 50.0;
 
 // Air resistance
 const AIR_DAMPING = 0.99;
@@ -95,14 +95,14 @@ const DistanceConstraint = struct {
         const dx = pb.x - pa.x;
         const dy = pb.y - pa.y;
         const distance = @sqrt(dx * dx + dy * dy);
-        
+
         if (distance < 1e-6) {
             return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 } };
         }
-        
+
         const norm_x = dx / distance;
         const norm_y = dy / distance;
-        
+
         return .{
             .ga = Vec2{ .x = -norm_x, .y = -norm_y },
             .gb = Vec2{ .x = norm_x, .y = norm_y },
@@ -145,14 +145,14 @@ const CollisionConstraint = struct {
         const dx = pb.x - pa.x;
         const dy = pb.y - pa.y;
         const distance = @sqrt(dx * dx + dy * dy);
-        
+
         if (distance < 1e-6) {
             return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 } };
         }
-        
+
         const norm_x = dx / distance;
         const norm_y = dy / distance;
-        
+
         return .{
             .ga = Vec2{ .x = -norm_x, .y = -norm_y },
             .gb = Vec2{ .x = norm_x, .y = norm_y },
@@ -167,9 +167,9 @@ const SeparationConstraint = struct {
     target_distance: f32, // Desired separation distance
     compliance: f32,
     lagrange_multiplier: f32,
-    
+
     const Self = @This();
-    
+
     pub fn init(a: u32, b: u32, target_dist: f32, stiffness: f32, dt: f32) Self {
         return Self{
             .particle_a = a,
@@ -187,9 +187,9 @@ const AlignmentConstraint = struct {
     neighbor_count: u32,
     compliance: f32,
     lagrange_multiplier: f32,
-    
+
     const Self = @This();
-    
+
     pub fn init(a: u32, stiffness: f32, dt: f32) Self {
         return Self{
             .particle_a = a,
@@ -207,9 +207,9 @@ const CohesionConstraint = struct {
     target_y: f32, // Center of mass Y
     compliance: f32,
     lagrange_multiplier: f32,
-    
+
     const Self = @This();
-    
+
     pub fn init(a: u32, target_x: f32, target_y: f32, stiffness: f32, dt: f32) Self {
         return Self{
             .particle_a = a,
@@ -233,7 +233,7 @@ const ParticleType = enum {
     free_agent, // Independent Boid
 };
 
-// XPBD Particle structure  
+// XPBD Particle structure
 const Particle = struct {
     x: f32,
     y: f32,
@@ -265,11 +265,11 @@ const Particle = struct {
         // Apply air damping to velocity
         self.vx *= AIR_DAMPING;
         self.vy *= AIR_DAMPING;
-        
+
         // Predict position using current velocity (explicit Euler prediction)
         self.predicted_x = self.x + self.vx * dt;
         self.predicted_y = self.y + self.vy * dt;
-        
+
         // Handle boundary collision in prediction
         const border = WORLD_SIZE / 2.0;
         if (self.predicted_x > border) {
@@ -294,7 +294,7 @@ const Particle = struct {
         // Update velocity based on position correction
         self.vx = (self.predicted_x - self.x) / dt;
         self.vy = (self.predicted_y - self.y) / dt;
-        
+
         // Update position
         self.x = self.predicted_x;
         self.y = self.predicted_y;
@@ -303,7 +303,7 @@ const Particle = struct {
     pub fn applyBoundaryConstraints(self: *Self) void {
         // Simple boundary constraints for XPBD
         const border = WORLD_SIZE / 2.0;
-        
+
         if (self.predicted_x > border) {
             self.predicted_x = border;
         }
@@ -388,7 +388,7 @@ const Spring = struct {
     particle_a: u32,
     particle_b: u32,
     rest_length: f32,
-    
+
     pub fn init(particle_a: u32, particle_b: u32, rest_length: f32) Spring {
         return Spring{
             .particle_a = particle_a,
@@ -617,14 +617,14 @@ fn generateConstraints(dt: f32) void {
     boids_separation_constraint_count = 0;
     boids_alignment_constraint_count = 0;
     boids_cohesion_constraint_count = 0;
-    
+
     // Generate distance constraints from springs
     for (0..spring_count) |i| {
         const spring = &springs[i];
         if (distance_constraint_count < MAX_DISTANCE_CONSTRAINTS) {
             // Calculate compliance: α = 1/(k * dt²)
             const spring_compliance = 1.0 / (SPRING_STRENGTH * dt * dt);
-            
+
             distance_constraints[distance_constraint_count] = DistanceConstraint{
                 .particle_a = spring.particle_a,
                 .particle_b = spring.particle_b,
@@ -635,7 +635,7 @@ fn generateConstraints(dt: f32) void {
             distance_constraint_count += 1;
         }
     }
-    
+
     // Generate mouse constraint if active
     if (mouse_has_connection) {
         mouse_constraint = DistanceConstraint{
@@ -648,13 +648,13 @@ fn generateConstraints(dt: f32) void {
     } else {
         mouse_constraint = null;
     }
-    
+
     // Generate collision constraints using spatial grid
     populateGrid();
     for (0..PARTICLE_COUNT) |i| {
         generateCollisionConstraintsForParticle(@intCast(i), dt);
     }
-    
+
     // Generate boids constraints for free agents only
     for (TOTAL_GRID_PARTICLES..PARTICLE_COUNT) |i| {
         generateBoidsConstraintsForParticle(@intCast(i), dt);
@@ -664,7 +664,7 @@ fn generateConstraints(dt: f32) void {
 // Generate collision constraints for a single particle using spatial grid
 fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
     const particle = &particles[particle_index];
-    
+
     // Check current cell and 8 surrounding cells
     const gx = worldToGrid(particle.predicted_x);
     const gy = worldToGrid(particle.predicted_y);
@@ -686,17 +686,23 @@ fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
                         const dx_pred = particle.predicted_x - other.predicted_x;
                         const dy_pred = particle.predicted_y - other.predicted_y;
                         const dist_sq = dx_pred * dx_pred + dy_pred * dy_pred;
-                        
-                        const min_distance = PARTICLE_SIZE * 2.2; // Slightly larger separation for better collision detection
-                        if (dist_sq < min_distance * min_distance) {
+
+                        // Billiard ball collision: only when actually overlapping
+                        const ball_radius = PARTICLE_SIZE; // Radius of each ball
+                        const contact_distance = ball_radius * 2.0; // Distance when balls just touch
+                        const current_distance = @sqrt(dist_sq);
+
+                        // Only create collision constraint when balls overlap (billiard ball style)
+                        if (current_distance < contact_distance) {
                             if (collision_constraint_count < MAX_COLLISION_CONSTRAINTS) {
-                                // High stiffness for collision constraints
-                                const collision_compliance = 1.0 / (SEPARATION_STRENGTH * dt * dt);
-                                
+                                // Very high stiffness for billiard ball collisions (10x stronger)
+                                const billiard_stiffness = COLLISION_STIFFNESS * 10.0;
+                                const collision_compliance = 1.0 / (billiard_stiffness * dt * dt);
+
                                 collision_constraints[collision_constraint_count] = CollisionConstraint{
                                     .particle_a = particle_index,
                                     .particle_b = neighbor_index,
-                                    .min_distance = min_distance,
+                                    .min_distance = contact_distance,
                                     .compliance = collision_compliance,
                                     .lagrange_multiplier = 0.0,
                                 };
@@ -713,17 +719,17 @@ fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
 // Generate boids constraints for a single free agent particle
 fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
     const particle = &particles[particle_index];
-    
+
     // Only apply to free agents
     if (particle.particle_type != ParticleType.free_agent) return;
-    
+
     var neighbors: [16]u32 = undefined;
     var neighbor_count: u32 = 0;
     var neighbor_positions_x: f32 = 0;
     var neighbor_positions_y: f32 = 0;
     var neighbor_velocities_x: f32 = 0;
     var neighbor_velocities_y: f32 = 0;
-    
+
     // Check current cell and surrounding cells for neighbors
     const gx = worldToGrid(particle.predicted_x);
     const gy = worldToGrid(particle.predicted_y);
@@ -745,24 +751,24 @@ fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
                         const dx_pred = particle.predicted_x - other.predicted_x;
                         const dy_pred = particle.predicted_y - other.predicted_y;
                         const dist_sq = dx_pred * dx_pred + dy_pred * dy_pred;
-                        
+
                         // Check if within boids interaction range (use largest radius)
                         const max_radius_sq = BOIDS_COHESION_RADIUS * BOIDS_COHESION_RADIUS;
                         if (dist_sq < max_radius_sq and neighbor_count < 16) {
                             neighbors[neighbor_count] = neighbor_index;
                             neighbor_count += 1;
-                            
+
                             // Accumulate for center of mass and average velocity
                             neighbor_positions_x += other.predicted_x;
                             neighbor_positions_y += other.predicted_y;
                             neighbor_velocities_x += other.vx;
                             neighbor_velocities_y += other.vy;
-                            
+
                             // Generate separation constraints for close neighbors
                             const sep_radius_sq = BOIDS_SEPARATION_RADIUS * BOIDS_SEPARATION_RADIUS;
                             if (dist_sq < sep_radius_sq and boids_separation_constraint_count < MAX_BOIDS_SEPARATION_CONSTRAINTS) {
                                 const separation_compliance = 1.0 / (BOIDS_SEPARATION_STIFFNESS * dt * dt);
-                                
+
                                 boids_separation_constraints[boids_separation_constraint_count] = SeparationConstraint{
                                     .particle_a = particle_index,
                                     .particle_b = neighbor_index,
@@ -778,15 +784,11 @@ fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
             }
         }
     }
-    
+
     // Generate alignment constraint if we have neighbors
     if (neighbor_count > 0 and boids_alignment_constraint_count < MAX_BOIDS_ALIGNMENT_CONSTRAINTS) {
-        boids_alignment_constraints[boids_alignment_constraint_count] = AlignmentConstraint.init(
-            particle_index, 
-            BOIDS_ALIGNMENT_STIFFNESS, 
-            dt
-        );
-        
+        boids_alignment_constraints[boids_alignment_constraint_count] = AlignmentConstraint.init(particle_index, BOIDS_ALIGNMENT_STIFFNESS, dt);
+
         // Store neighbor information
         var constraint = &boids_alignment_constraints[boids_alignment_constraint_count];
         constraint.neighbor_count = @min(neighbor_count, 16);
@@ -795,19 +797,13 @@ fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
         }
         boids_alignment_constraint_count += 1;
     }
-    
+
     // Generate cohesion constraint if we have neighbors
     if (neighbor_count > 0 and boids_cohesion_constraint_count < MAX_BOIDS_COHESION_CONSTRAINTS) {
         const center_x = neighbor_positions_x / @as(f32, @floatFromInt(neighbor_count));
         const center_y = neighbor_positions_y / @as(f32, @floatFromInt(neighbor_count));
-        
-        boids_cohesion_constraints[boids_cohesion_constraint_count] = CohesionConstraint.init(
-            particle_index,
-            center_x,
-            center_y,
-            BOIDS_COHESION_STIFFNESS,
-            dt
-        );
+
+        boids_cohesion_constraints[boids_cohesion_constraint_count] = CohesionConstraint.init(particle_index, center_x, center_y, BOIDS_COHESION_STIFFNESS, dt);
         boids_cohesion_constraint_count += 1;
     }
 }
@@ -818,26 +814,26 @@ fn solveConstraints(dt: f32) void {
     for (0..distance_constraint_count) |i| {
         solveDistanceConstraint(&distance_constraints[i], dt);
     }
-    
+
     // Solve mouse constraint if active
     if (mouse_constraint) |*constraint| {
         solveMouseConstraint(constraint, dt);
     }
-    
+
     // Solve collision constraints
     for (0..collision_constraint_count) |i| {
         solveCollisionConstraint(&collision_constraints[i], dt);
     }
-    
+
     // Solve boids constraints
     for (0..boids_separation_constraint_count) |i| {
         solveSeparationConstraint(&boids_separation_constraints[i], dt);
     }
-    
+
     for (0..boids_alignment_constraint_count) |i| {
         solveAlignmentConstraint(&boids_alignment_constraints[i], dt);
     }
-    
+
     for (0..boids_cohesion_constraint_count) |i| {
         solveCohesionConstraint(&boids_cohesion_constraints[i], dt);
     }
@@ -855,41 +851,41 @@ fn solveCollisionConstraintsOnly(dt: f32) void {
 fn solveDistanceConstraint(constraint: *DistanceConstraint, dt: f32) void {
     const particle_a = &particles[constraint.particle_a];
     const particle_b = &particles[constraint.particle_b];
-    
+
     // Calculate constraint value C(x) = |x_a - x_b| - rest_length
     const dx = particle_a.predicted_x - particle_b.predicted_x;
     const dy = particle_a.predicted_y - particle_b.predicted_y;
     const current_distance = @sqrt(dx * dx + dy * dy);
-    
+
     if (current_distance < 0.001) return; // Avoid division by zero
-    
+
     const constraint_value = current_distance - constraint.rest_length;
-    
+
     // Calculate constraint gradient ∇C
     const grad_x = dx / current_distance;
     const grad_y = dy / current_distance;
-    
+
     // Calculate denominator for Lagrange multiplier
     // w_a * |∇C_a|² + w_b * |∇C_b|² + α/dt²
     const w_a = 1.0 / particle_a.mass;
     const w_b = 1.0 / particle_b.mass;
     const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
     const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
-    
+
     if (denominator < 0.001) return; // Avoid division by zero
-    
+
     // Calculate delta Lagrange multiplier
     const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
-    
+
     // Update Lagrange multiplier
     constraint.lagrange_multiplier += delta_lambda;
-    
+
     // Apply position corrections
     const correction_a_x = w_a * delta_lambda * grad_x;
     const correction_a_y = w_a * delta_lambda * grad_y;
     const correction_b_x = -w_b * delta_lambda * grad_x;
     const correction_b_y = -w_b * delta_lambda * grad_y;
-    
+
     // Update predicted positions
     particles[constraint.particle_a].predicted_x += correction_a_x;
     particles[constraint.particle_a].predicted_y += correction_a_y;
@@ -900,131 +896,141 @@ fn solveDistanceConstraint(constraint: *DistanceConstraint, dt: f32) void {
 // Solve mouse constraint (particle to mouse position)
 fn solveMouseConstraint(constraint: *DistanceConstraint, dt: f32) void {
     const particle = &particles[constraint.particle_a];
-    
+
     // Calculate constraint value C(x) = |x_particle - x_mouse| - rest_length
     const dx = particle.predicted_x - mouse_x;
     const dy = particle.predicted_y - mouse_y;
     const current_distance = @sqrt(dx * dx + dy * dy);
-    
+
     if (current_distance < 0.001) return; // Avoid division by zero
-    
+
     const constraint_value = current_distance - constraint.rest_length;
-    
+
     // Calculate constraint gradient ∇C
     const grad_x = dx / current_distance;
     const grad_y = dy / current_distance;
-    
+
     // Mouse has infinite mass, so only particle moves
     const w_particle = 1.0 / particle.mass;
     const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
     const denominator = w_particle * grad_length_sq + constraint.compliance / (dt * dt);
-    
+
     if (denominator < 0.001) return; // Avoid division by zero
-    
+
     // Calculate delta Lagrange multiplier
     const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
-    
+
     // Update Lagrange multiplier
     constraint.lagrange_multiplier += delta_lambda;
-    
+
     // Apply position correction only to particle
     const correction_x = w_particle * delta_lambda * grad_x;
     const correction_y = w_particle * delta_lambda * grad_y;
-    
+
     // Update predicted position
     particles[constraint.particle_a].predicted_x += correction_x;
     particles[constraint.particle_a].predicted_y += correction_y;
 }
 
-// Solve individual collision constraint using XPBD
+// Solve individual collision constraint using billiard ball physics
 fn solveCollisionConstraint(constraint: *CollisionConstraint, dt: f32) void {
+    _ = dt; // Mark as intentionally unused
     const particle_a = &particles[constraint.particle_a];
     const particle_b = &particles[constraint.particle_b];
-    
+
     // Calculate constraint value C(x) = min_distance - |x_a - x_b|
     const dx = particle_a.predicted_x - particle_b.predicted_x;
     const dy = particle_a.predicted_y - particle_b.predicted_y;
     const current_distance = @sqrt(dx * dx + dy * dy);
-    
-    if (current_distance < 0.001) return; // Avoid division by zero
-    
+
+    if (current_distance < 0.001) {
+        // Handle edge case of particles at same position
+        particles[constraint.particle_a].predicted_x += 0.01;
+        particles[constraint.particle_b].predicted_x -= 0.01;
+        return;
+    }
+
     const constraint_value = constraint.min_distance - current_distance;
-    
-    // Only solve if constraint is violated (particles too close)
+
+    // Only solve if constraint is violated (particles overlapping)
     if (constraint_value <= 0) return;
-    
-    // Calculate constraint gradient ∇C (negative because we subtract distance)
-    const grad_x = -dx / current_distance;
-    const grad_y = -dy / current_distance;
-    
-    // Calculate denominator for Lagrange multiplier
-    const w_a = 1.0 / particle_a.mass;
-    const w_b = 1.0 / particle_b.mass;
-    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
-    const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
-    
-    if (denominator < 0.001) return; // Avoid division by zero
-    
-    // Calculate delta Lagrange multiplier
-    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
-    
-    // Update Lagrange multiplier
-    constraint.lagrange_multiplier += delta_lambda;
-    
-    // Apply position corrections
-    const correction_a_x = w_a * delta_lambda * grad_x;
-    const correction_a_y = w_a * delta_lambda * grad_y;
-    const correction_b_x = -w_b * delta_lambda * grad_x;
-    const correction_b_y = -w_b * delta_lambda * grad_y;
-    
-    // Update predicted positions
-    particles[constraint.particle_a].predicted_x += correction_a_x;
-    particles[constraint.particle_a].predicted_y += correction_a_y;
-    particles[constraint.particle_b].predicted_x += correction_b_x;
-    particles[constraint.particle_b].predicted_y += correction_b_y;
+
+    // Calculate collision normal (from b to a)
+    const normal_x = dx / current_distance;
+    const normal_y = dy / current_distance;
+
+    // POSITION CORRECTION: Separate overlapping particles
+    const separation = constraint_value * 0.5; // Each particle moves half the overlap distance
+    particles[constraint.particle_a].predicted_x += normal_x * separation;
+    particles[constraint.particle_a].predicted_y += normal_y * separation;
+    particles[constraint.particle_b].predicted_x -= normal_x * separation;
+    particles[constraint.particle_b].predicted_y -= normal_y * separation;
+
+    // ELASTIC COLLISION: Apply velocity changes for billiard ball physics
+    // Calculate relative velocity along collision normal
+    const rel_vx = particle_a.vx - particle_b.vx;
+    const rel_vy = particle_a.vy - particle_b.vy;
+    const rel_vel_normal = rel_vx * normal_x + rel_vy * normal_y;
+
+    // Only resolve if objects are approaching (not separating)
+    if (rel_vel_normal > 0) return;
+
+    // Calculate impulse for elastic collision
+    const restitution = 0.9; // Slightly less than perfectly elastic for stability
+    const impulse_magnitude = -(1.0 + restitution) * rel_vel_normal / (1.0 / particle_a.mass + 1.0 / particle_b.mass);
+
+    // Apply impulse to velocities (billiard ball momentum conservation)
+    const impulse_x = impulse_magnitude * normal_x;
+    const impulse_y = impulse_magnitude * normal_y;
+
+    // Apply impulse correctly: F = dp/dt, so dv = F/m
+    particles[constraint.particle_a].vx += impulse_x / particle_a.mass;
+    particles[constraint.particle_a].vy += impulse_y / particle_a.mass;
+    particles[constraint.particle_b].vx -= impulse_x / particle_b.mass;
+    particles[constraint.particle_b].vy -= impulse_y / particle_b.mass;
 }
 
 // Solve boids separation constraint (keep particles apart)
 fn solveSeparationConstraint(constraint: *SeparationConstraint, dt: f32) void {
     const particle_a = &particles[constraint.particle_a];
     const particle_b = &particles[constraint.particle_b];
-    
+
     // Calculate constraint value C(x) = target_distance - |x_a - x_b|
     const dx = particle_a.predicted_x - particle_b.predicted_x;
     const dy = particle_a.predicted_y - particle_b.predicted_y;
     const current_distance = @sqrt(dx * dx + dy * dy);
-    
+
     if (current_distance < 0.001) return; // Avoid division by zero
-    
+
     // Only enforce if particles are too close (current_distance < target_distance)
     if (current_distance >= constraint.target_distance) return;
-    
+
     const constraint_value = constraint.target_distance - current_distance;
-    
+
     // Calculate constraint gradient ∇C (negative because we subtract distance)
     const grad_x = -dx / current_distance;
     const grad_y = -dy / current_distance;
-    
+
     // Calculate denominator for Lagrange multiplier
     const w_a = 1.0 / particle_a.mass;
     const w_b = 1.0 / particle_b.mass;
     const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
     const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
-    
+
     if (denominator < 0.001) return; // Avoid division by zero
-    
+
     // Calculate delta Lagrange multiplier
     const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
-    
+
     // Update Lagrange multiplier
     constraint.lagrange_multiplier += delta_lambda;
-    
+
     // Apply position corrections
     const correction_a_x = w_a * delta_lambda * grad_x;
     const correction_a_y = w_a * delta_lambda * grad_y;
     const correction_b_x = -w_b * delta_lambda * grad_x;
     const correction_b_y = -w_b * delta_lambda * grad_y;
-    
+
     // Update predicted positions
     particles[constraint.particle_a].predicted_x += correction_a_x;
     particles[constraint.particle_a].predicted_y += correction_a_y;
@@ -1035,9 +1041,9 @@ fn solveSeparationConstraint(constraint: *SeparationConstraint, dt: f32) void {
 // Solve alignment constraint (align velocities with neighbors)
 fn solveAlignmentConstraint(constraint: *AlignmentConstraint, dt: f32) void {
     const particle = &particles[constraint.particle_a];
-    
+
     if (constraint.neighbor_count == 0) return;
-    
+
     // Calculate average neighbor velocity
     var avg_vx: f32 = 0;
     var avg_vy: f32 = 0;
@@ -1048,16 +1054,16 @@ fn solveAlignmentConstraint(constraint: *AlignmentConstraint, dt: f32) void {
     }
     avg_vx /= @as(f32, @floatFromInt(constraint.neighbor_count));
     avg_vy /= @as(f32, @floatFromInt(constraint.neighbor_count));
-    
+
     // Apply velocity alignment as position correction (XPBD style)
     const velocity_diff_x = avg_vx - particle.vx;
     const velocity_diff_y = avg_vy - particle.vy;
-    
+
     // Convert velocity difference to position correction
     const alignment_strength = 1.0 / (constraint.compliance + dt * dt);
     const correction_x = velocity_diff_x * dt * alignment_strength * 0.01; // Small factor for stability
     const correction_y = velocity_diff_y * dt * alignment_strength * 0.01;
-    
+
     // Apply position correction
     particles[constraint.particle_a].predicted_x += correction_x;
     particles[constraint.particle_a].predicted_y += correction_y;
@@ -1066,27 +1072,27 @@ fn solveAlignmentConstraint(constraint: *AlignmentConstraint, dt: f32) void {
 // Solve cohesion constraint (attract to center of mass)
 fn solveCohesionConstraint(constraint: *CohesionConstraint, dt: f32) void {
     const particle = &particles[constraint.particle_a];
-    
+
     // Calculate constraint value C(x) = |x_particle - center_of_mass|
     const dx = particle.predicted_x - constraint.target_x;
     const dy = particle.predicted_y - constraint.target_y;
     const distance_to_center = @sqrt(dx * dx + dy * dy);
-    
+
     if (distance_to_center < 0.001) return; // Already at center
-    
+
     // We want to minimize distance to center, so constraint is just the distance
     const constraint_value = distance_to_center;
-    
+
     // Calculate constraint gradient ∇C
     const grad_x = dx / distance_to_center;
     const grad_y = dy / distance_to_center;
-    
-    // Calculate correction (simple attraction)  
+
+    // Calculate correction (simple attraction)
     const cohesion_strength = 1.0 / (constraint.compliance + dt * dt);
-    
-    const correction_x = -grad_x * constraint_value * cohesion_strength * 0.01; // Small factor for stability
-    const correction_y = -grad_y * constraint_value * cohesion_strength * 0.01;
-    
+
+    const correction_x = -grad_x * constraint_value * cohesion_strength * 0.001; // Very small factor for stability
+    const correction_y = -grad_y * constraint_value * cohesion_strength * 0.001;
+
     // Apply position correction
     particles[constraint.particle_a].predicted_x += correction_x;
     particles[constraint.particle_a].predicted_y += correction_y;
@@ -1147,19 +1153,19 @@ export fn update_particles(dt: f32) void {
 
     // Step 2: Generate constraints and solve them iteratively
     generateConstraints(dt);
-    
+
     // Solve constraints for multiple iterations for stability
     const solver_iterations = 5; // More iterations for better stability
     for (0..solver_iterations) |_| {
         solveConstraints(dt);
     }
-    
+
     // Extra collision-only passes for snappy collision response
     const collision_passes = 3;
     for (0..collision_passes) |_| {
         solveCollisionConstraintsOnly(dt);
     }
-    
+
     // Step 3: Update velocities and positions from predictions
     for (0..PARTICLE_COUNT) |i| {
         var particle = &particles[i];

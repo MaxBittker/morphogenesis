@@ -10,10 +10,12 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "webgpu-demo",
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
-    exe.root_module.root_source_file = b.path("src/main.zig");
 
     // No entry point for WASM library
     exe.entry = .disabled;
