@@ -21,8 +21,8 @@ var world_width: f32 = WORLD_SIZE;
 var world_height: f32 = WORLD_SIZE;
 
 // XPBD solver parameters
-const XPBD_ITERATIONS = 5; // Constraint solver iterations per timestep
-const XPBD_SUBSTEPS = 1; // Number of substeps per frame
+const XPBD_ITERATIONS = 1; // Constraint solver iterations per timestep
+const XPBD_SUBSTEPS = 3; // Number of substeps per frame
 
 // Constraint parameters (compliance = 1/(stiffness * dt²))
 const DISTANCE_STIFFNESS = 100000.0; // Very stiff rods
@@ -1003,14 +1003,12 @@ export fn update_particles(dt: f32) void {
     generateConstraints(dt);
 
     // Solve constraints for multiple iterations for stability
-    const solver_iterations = 5; // More iterations for better stability
-    for (0..solver_iterations) |_| {
+    for (0..XPBD_ITERATIONS) |_| {
         solveConstraints(dt);
     }
 
     // Extra collision-only passes for snappy collision response
-    const collision_passes = 3;
-    for (0..collision_passes) |_| {
+    for (0..XPBD_SUBSTEPS) |_| {
         solveCollisionConstraintsOnly(dt);
     }
 
