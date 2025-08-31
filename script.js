@@ -26,8 +26,18 @@ function resizeCanvas() {
   canvas.style.width = window.innerWidth + "px";
   canvas.style.height = window.innerHeight + "px";
 
-  // Store aspect ratio for coordinate transformation
+  // Store aspect ratio for reference
   window.aspectRatio = canvas.width / canvas.height;
+  
+  // Set world dimensions to exactly match canvas pixel dimensions (1:1 mapping)
+  if (wasmModule && wasmModule.exports.set_world_dimensions) {
+    // World space = canvas pixel space
+    const worldWidth = canvas.width;
+    const worldHeight = canvas.height;
+    
+    wasmModule.exports.set_world_dimensions(worldWidth, worldHeight);
+    console.log(`World dimensions set to canvas size: ${worldWidth} x ${worldHeight} pixels`);
+  }
 }
 
 window.addEventListener("resize", resizeCanvas);
@@ -45,10 +55,10 @@ function screenToWorld(screenX, screenY) {
   const ndcX = (canvasX / canvas.width) * 2 - 1;
   const ndcY = -((canvasY / canvas.height) * 2 - 1); // Flip Y axis
   
-  // Convert to world coordinates - simple direct mapping
-  const worldSize = wasmModule ? wasmModule.exports.get_world_size() : 1.95;
-  const worldX = ndcX * (worldSize / 2);
-  const worldY = ndcY * (worldSize / 2);
+  // Convert screen coordinates directly to world coordinates (1:1 mapping)
+  // World coordinates = canvas pixel coordinates with origin at center
+  const worldX = canvasX - (canvas.width / 2);
+  const worldY = (canvas.height / 2) - canvasY; // Flip Y axis for standard coordinate system
   
   return { x: worldX, y: worldY };
 }
@@ -140,6 +150,10 @@ async function loadWasm() {
 
     // Initialize the WASM module
     wasmModule.exports.init();
+    
+    // Set initial world dimensions based on current aspect ratio
+    resizeCanvas(); // This will call set_world_dimensions
+    
     return true;
   } catch (error) {
     log("WASM loading error: " + error.message);

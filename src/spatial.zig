@@ -4,9 +4,9 @@ const std = @import("std");
 pub const GRID_SIZE = 25;
 pub const MAX_PARTICLES_PER_CELL = 500;
 
-// Pre-calculated constants for worldToGrid optimization
-const GRID_SCALE = @as(f32, GRID_SIZE) / @import("main.zig").WORLD_SIZE;
-const WORLD_HALF = @import("main.zig").WORLD_SIZE / 2.0;
+// Pre-calculated constants for worldToGrid optimization  
+const main_module = @import("main.zig");
+const BASE_WORLD_SIZE = main_module.WORLD_SIZE;
 
 // Spatial grid cell structure
 pub const GridCell = struct {
@@ -38,16 +38,31 @@ pub const GridCell = struct {
 pub var spatial_grid: [GRID_SIZE][GRID_SIZE]GridCell = undefined;
 var grid_initialized = false;
 
-// Spatial grid helper functions
-pub inline fn worldToGrid(world_pos: f32) i32 {
-    // Optimized: single multiply instead of add + divide + multiply
-    const grid_pos = @as(i32, @intFromFloat((world_pos + WORLD_HALF) * GRID_SCALE));
+// Spatial grid helper functions with aspect-aware scaling
+pub inline fn worldToGridX(world_x: f32) i32 {
+    const world_width = main_module.get_world_width();
+    const grid_scale_x = @as(f32, GRID_SIZE) / world_width;
+    const world_half_x = world_width / 2.0;
+    const grid_pos = @as(i32, @intFromFloat((world_x + world_half_x) * grid_scale_x));
     return @max(0, @min(GRID_SIZE - 1, grid_pos));
 }
 
+pub inline fn worldToGridY(world_y: f32) i32 {
+    const world_height = main_module.get_world_height();
+    const grid_scale_y = @as(f32, GRID_SIZE) / world_height;
+    const world_half_y = world_height / 2.0;
+    const grid_pos = @as(i32, @intFromFloat((world_y + world_half_y) * grid_scale_y));
+    return @max(0, @min(GRID_SIZE - 1, grid_pos));
+}
+
+// Legacy function for compatibility
+pub inline fn worldToGrid(world_pos: f32) i32 {
+    return worldToGridX(world_pos); // Default to X-axis behavior
+}
+
 pub fn getGridCell(x: f32, y: f32) *GridCell {
-    const gx = worldToGrid(x);
-    const gy = worldToGrid(y);
+    const gx = worldToGridX(x);
+    const gy = worldToGridY(y);
     return &spatial_grid[@intCast(gx)][@intCast(gy)];
 }
 

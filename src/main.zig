@@ -12,9 +12,13 @@ pub const FREE_AGENT_COUNT = 1;
 pub const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
 
 // Particle physical properties
-const PARTICLE_SIZE = 0.02; // Physical radius of particles
+const PARTICLE_SIZE = 15.0; // Physical radius in pixels
 const PARTICLE_MASS = 1.0; // Normalized particle mass
-pub const WORLD_SIZE = 1.95; // Keep particles well within bounds regardless of aspect ratio
+pub const WORLD_SIZE = 1.95; // Base world size (height for portrait, width for landscape)
+
+// Aspect-ratio aware world dimensions (updated from JavaScript)
+var world_width: f32 = WORLD_SIZE;
+var world_height: f32 = WORLD_SIZE;
 
 // XPBD solver parameters
 const XPBD_ITERATIONS = 5; // Constraint solver iterations per timestep
@@ -267,22 +271,23 @@ pub const Particle = struct {
         self.predicted_x = self.x + self.vx * dt;
         self.predicted_y = self.y + self.vy * dt;
 
-        // Handle boundary collision in prediction
-        const border = WORLD_SIZE / 2.0;
-        if (self.predicted_x > border) {
-            self.predicted_x = border;
+        // Handle boundary collision in prediction with aspect-aware bounds
+        const border_x = world_width / 2.0;
+        const border_y = world_height / 2.0;
+        if (self.predicted_x > border_x) {
+            self.predicted_x = border_x;
             self.vx *= -0.8; // Bounce damping
         }
-        if (self.predicted_x < -border) {
-            self.predicted_x = -border;
+        if (self.predicted_x < -border_x) {
+            self.predicted_x = -border_x;
             self.vx *= -0.8;
         }
-        if (self.predicted_y > border) {
-            self.predicted_y = border;
+        if (self.predicted_y > border_y) {
+            self.predicted_y = border_y;
             self.vy *= -0.8;
         }
-        if (self.predicted_y < -border) {
-            self.predicted_y = -border;
+        if (self.predicted_y < -border_y) {
+            self.predicted_y = -border_y;
             self.vy *= -0.8;
         }
     }
@@ -298,20 +303,21 @@ pub const Particle = struct {
     }
 
     pub fn applyBoundaryConstraints(self: *Self) void {
-        // Simple boundary constraints for XPBD
-        const border = WORLD_SIZE / 2.0;
+        // Aspect-aware boundary constraints for XPBD
+        const border_x = world_width / 2.0;
+        const border_y = world_height / 2.0;
 
-        if (self.predicted_x > border) {
-            self.predicted_x = border;
+        if (self.predicted_x > border_x) {
+            self.predicted_x = border_x;
         }
-        if (self.predicted_x < -border) {
-            self.predicted_x = -border;
+        if (self.predicted_x < -border_x) {
+            self.predicted_x = -border_x;
         }
-        if (self.predicted_y > border) {
-            self.predicted_y = border;
+        if (self.predicted_y > border_y) {
+            self.predicted_y = border_y;
         }
-        if (self.predicted_y < -border) {
-            self.predicted_y = -border;
+        if (self.predicted_y < -border_y) {
+            self.predicted_y = -border_y;
         }
     }
 };
@@ -509,8 +515,8 @@ fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
     const particle = &particles[particle_index];
 
     // Check current cell and 8 surrounding cells
-    const gx = spatial.worldToGrid(particle.predicted_x);
-    const gy = spatial.worldToGrid(particle.predicted_y);
+    const gx = spatial.worldToGridX(particle.predicted_x);
+    const gy = spatial.worldToGridY(particle.predicted_y);
 
     var dy: i32 = -1;
     while (dy <= 1) : (dy += 1) {
@@ -574,8 +580,8 @@ fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
     var neighbor_velocities_y: f32 = 0;
 
     // Check current cell and surrounding cells for neighbors
-    const gx = spatial.worldToGrid(particle.predicted_x);
-    const gy = spatial.worldToGrid(particle.predicted_y);
+    const gx = spatial.worldToGridX(particle.predicted_x);
+    const gy = spatial.worldToGridY(particle.predicted_y);
 
     var dy: i32 = -1;
     while (dy <= 1) : (dy += 1) {
@@ -1023,6 +1029,20 @@ export fn get_particle_count() i32 {
 // Export important constants to avoid duplication in JavaScript
 export fn get_world_size() f32 {
     return WORLD_SIZE;
+}
+
+pub export fn get_world_width() f32 {
+    return world_width;
+}
+
+pub export fn get_world_height() f32 {
+    return world_height;
+}
+
+pub export fn set_world_dimensions(width: f32, height: f32) void {
+    world_width = width;
+    world_height = height;
+    log("World dimensions updated: {d:.2} x {d:.2}", .{ world_width, world_height });
 }
 
 export fn get_grid_size() i32 {

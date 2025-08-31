@@ -29,14 +29,16 @@ fn log(comptime fmt: []const u8, args: anytype) void {
 
 // Initialize grid particles in 5x5 layout of grids
 pub fn initializeGridParticles() void {
-    // Generate grid positions in a 5x5 layout
+    // Generate grid positions in a 5x5 layout using pixel coordinates
     var grid_positions: [25][2]f32 = undefined;
     var grid_index: u32 = 0;
 
+    // Space grids 150 pixels apart
+    const grid_spacing = 150.0;
     for (0..5) |row| {
         for (0..5) |col| {
-            const x = (@as(f32, @floatFromInt(col)) - 2.0) * 0.4;
-            const y = (@as(f32, @floatFromInt(row)) - 2.0) * 0.4;
+            const x = (@as(f32, @floatFromInt(col)) - 2.0) * grid_spacing;
+            const y = (@as(f32, @floatFromInt(row)) - 2.0) * grid_spacing;
             grid_positions[grid_index] = [_]f32{ x, y };
             grid_index += 1;
         }
@@ -71,9 +73,11 @@ pub fn initializeFreeAgents() void {
 
     for (start_index..PARTICLE_COUNT) |i| {
         const seed = @as(f32, @floatFromInt(i));
-        const range = WORLD_SIZE * 0.8;
-        const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range;
-        const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range;
+        // Spawn in a 800x600 pixel area around the center
+        const range_x = 400.0; // ±400 pixels horizontally 
+        const range_y = 300.0; // ±300 pixels vertically
+        const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range_x;
+        const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range_y;
 
         main.setParticle(i, Particle.init(x, y, ParticleType.free_agent, 255));
     }
