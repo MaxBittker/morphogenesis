@@ -11,11 +11,13 @@ class MorphogenesisRenderer {
     this.renderPipeline = null;
     this.gridRenderPipeline = null;
     this.springRenderPipeline = null;
+    this.mouseSpringRenderPipeline = null;
     
     // Buffers
     this.vertexBuffer = null;
     this.gridVertexBuffer = null;
     this.springVertexBuffer = null;
+    this.mouseSpringVertexBuffer = null;
     this.instanceBuffer = null;
     this.uniformBuffer = null;
     
@@ -23,6 +25,7 @@ class MorphogenesisRenderer {
     this.bindGroup = null;
     this.gridBindGroup = null;
     this.springBindGroup = null;
+    this.mouseSpringBindGroup = null;
     
     // Rendering state
     this.gridLinesCount = 0;
@@ -87,15 +90,30 @@ class MorphogenesisRenderer {
     this.gridSize = wasmModule.exports.get_grid_size();
     this.maxParticles = wasmModule.exports.get_max_particles();
     this.maxSprings = wasmModule.exports.get_max_springs();
+    this.particleSize = wasmModule.exports.get_particle_size();
     
-    this.log(`Constants from WASM: world=${this.worldSize}, grid=${this.gridSize}, particles=${this.maxParticles}, springs=${this.maxSprings}`);
+    this.log(`Constants from WASM: world=${this.worldSize}, grid=${this.gridSize}, particles=${this.maxParticles}, springs=${this.maxSprings}, particleSize=${this.particleSize}`);
+  }
+  
+  getCurrentWorldDimensions(wasmModule) {
+    // Get current world dimensions (may have changed due to aspect ratio)
+    if (wasmModule.exports.get_world_width && wasmModule.exports.get_world_height) {
+      return {
+        width: wasmModule.exports.get_world_width(),
+        height: wasmModule.exports.get_world_height()
+      };
+    }
+    // Fallback to square world
+    return { width: this.worldSize, height: this.worldSize };
   }
 
   createShaders() {
     // Particle vertex shader
     const particleVertexShaderCode = `
       struct Uniforms {
-          aspect_ratio: f32,
+          particle_size: f32,
+          world_width: f32,
+          world_height: f32,
       }
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
@@ -114,19 +132,15 @@ class MorphogenesisRenderer {
       fn main(input: VertexInput, @builtin(instance_index) instance_id: u32) -> VertexOutput {
           var output: VertexOutput;
           
-          // Create square around particle position for circle rendering
-          let particle_size = 0.008; 
-          var scaled_pos = input.position * particle_size;
-          
-          // Adjust for aspect ratio to keep circles circular
-          if (uniforms.aspect_ratio > 1.0) {
-              scaled_pos.x = scaled_pos.x / uniforms.aspect_ratio;
-          } else {
-              scaled_pos.y = scaled_pos.y * uniforms.aspect_ratio;
-          }
-          
+          // Create square around particle position (in world pixels)
+          let scaled_pos = input.position * uniforms.particle_size;
           let world_pos = scaled_pos + input.particle_pos;
-          output.position = vec4<f32>(world_pos, 0.0, 1.0);
+          
+          // Transform world pixel coordinates to NDC space
+          let ndc_x = world_pos.x / (uniforms.world_width * 0.5);
+          let ndc_y = world_pos.y / (uniforms.world_height * 0.5);
+          
+          output.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
           output.uv = input.position;
           
           // Color based on particle index for stable identity-based colors
@@ -161,13 +175,18 @@ class MorphogenesisRenderer {
     // Grid visualization shader
     const gridVertexShaderCode = `
       struct Uniforms {
-          aspect_ratio: f32,
+          particle_size: f32,
+          world_width: f32,
+          world_height: f32,
       }
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
       
       @vertex
       fn main(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
-          return vec4<f32>(position, 0.0, 1.0);
+          // Transform world pixel coordinates to NDC
+          let ndc_x = position.x / (uniforms.world_width * 0.5);
+          let ndc_y = position.y / (uniforms.world_height * 0.5);
+          return vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
       }
     `;
 
@@ -181,20 +200,33 @@ class MorphogenesisRenderer {
     // Spring visualization shader
     const springVertexShaderCode = `
       struct Uniforms {
-          aspect_ratio: f32,
+          particle_size: f32,
+          world_width: f32,
+          world_height: f32,
       }
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
       
       @vertex
       fn main(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
-          return vec4<f32>(position, 0.0, 1.0);
+          // Transform world pixel coordinates to NDC
+          let ndc_x = position.x / (uniforms.world_width * 0.5);
+          let ndc_y = position.y / (uniforms.world_height * 0.5);
+          return vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
       }
     `;
 
     const springFragmentShaderCode = `
       @fragment
       fn main() -> @location(0) vec4<f32> {
-          return vec4<f32>(0.8, 0.6, 0.2, 0.3);
+          return vec4<f32>(1.0, 1.0, 1.0, 0.9); // Bright white, very opaque
+      }
+    `;
+
+    // Mouse spring visualization shader (bright, prominent color)
+    const mouseSpringFragmentShaderCode = `
+      @fragment
+      fn main() -> @location(0) vec4<f32> {
+          return vec4<f32>(1.0, 0.2, 0.2, 0.8); // Bright red, more opaque
       }
     `;
 
@@ -204,7 +236,8 @@ class MorphogenesisRenderer {
       gridVertex: gridVertexShaderCode,
       gridFragment: gridFragmentShaderCode,
       springVertex: springVertexShaderCode,
-      springFragment: springFragmentShaderCode
+      springFragment: springFragmentShaderCode,
+      mouseSpringFragment: mouseSpringFragmentShaderCode
     };
   }
 
@@ -218,6 +251,7 @@ class MorphogenesisRenderer {
     const gridFragmentModule = this.device.createShaderModule({ code: shaders.gridFragment });
     const springVertexModule = this.device.createShaderModule({ code: shaders.springVertex });
     const springFragmentModule = this.device.createShaderModule({ code: shaders.springFragment });
+    const mouseSpringFragmentModule = this.device.createShaderModule({ code: shaders.mouseSpringFragment });
 
     // Create bind group layout
     const bindGroupLayout = this.device.createBindGroupLayout({
@@ -313,6 +347,32 @@ class MorphogenesisRenderer {
       primitive: { topology: "line-list" },
     });
 
+    // Create mouse spring render pipeline (same as spring but with different color)
+    this.mouseSpringRenderPipeline = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+      vertex: {
+        module: springVertexModule,
+        entryPoint: "main",
+        buffers: [{
+          arrayStride: 2 * 4,
+          stepMode: "vertex", 
+          attributes: [{ format: "float32x2", offset: 0, shaderLocation: 0 }],
+        }],
+      },
+      fragment: {
+        module: mouseSpringFragmentModule,
+        entryPoint: "main",
+        targets: [{
+          format: navigator.gpu.getPreferredCanvasFormat(),
+          blend: {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+          },
+        }],
+      },
+      primitive: { topology: "line-list" },
+    });
+
     this.log("Render pipelines created successfully");
     return bindGroupLayout;
   }
@@ -336,36 +396,13 @@ class MorphogenesisRenderer {
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
 
-    // Create grid lines
-    const worldHalf = this.worldSize / 2.0;
-    const totalGridLines = (this.gridSize + 1) * 2;
-    const gridLinesArray = new Float32Array(totalGridLines * 4);
-    let gridIndex = 0;
-    
-    // Vertical lines
-    for (let i = 0; i <= this.gridSize; i++) {
-      const x = (i / this.gridSize) * this.worldSize - worldHalf;
-      gridLinesArray[gridIndex++] = x;
-      gridLinesArray[gridIndex++] = -worldHalf;
-      gridLinesArray[gridIndex++] = x;
-      gridLinesArray[gridIndex++] = worldHalf;
-    }
-    
-    // Horizontal lines
-    for (let i = 0; i <= this.gridSize; i++) {
-      const y = (i / this.gridSize) * this.worldSize - worldHalf;
-      gridLinesArray[gridIndex++] = -worldHalf;
-      gridLinesArray[gridIndex++] = y;
-      gridLinesArray[gridIndex++] = worldHalf;
-      gridLinesArray[gridIndex++] = y;
-    }
-    
+    // Create grid buffer (will be updated dynamically based on world dimensions)
+    const maxGridLines = (this.gridSize + 1) * 2;
     this.gridVertexBuffer = this.device.createBuffer({
-      size: gridLinesArray.byteLength,
+      size: maxGridLines * 4 * 4, // Extra space for aspect ratio variations
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(this.gridVertexBuffer, 0, gridLinesArray);
-    this.gridLinesCount = totalGridLines;
+    this.gridLinesCount = 0; // Will be set when grid is updated
 
     // Spring vertex buffer
     this.springVertexBuffer = this.device.createBuffer({
@@ -373,9 +410,15 @@ class MorphogenesisRenderer {
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
 
-    // Uniform buffer for aspect ratio
+    // Mouse spring vertex buffer (for single mouse connection)
+    this.mouseSpringVertexBuffer = this.device.createBuffer({
+      size: 4 * 4, // One line (2 vertices * 2 coordinates * 4 bytes)
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+
+    // Uniform buffer for shader uniforms
     this.uniformBuffer = this.device.createBuffer({
-      size: 4,
+      size: 12, // 4 bytes each for particle_size, world_width, world_height
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -395,10 +438,16 @@ class MorphogenesisRenderer {
       entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
     });
 
+    this.mouseSpringBindGroup = this.device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
+    });
+
     // Pre-allocate reusable TypedArray buffers
     this.particlePositionsBuffer = new Float32Array(this.maxParticles * 2);
     this.springVerticesBuffer = new Float32Array(this.maxSprings * 4);
-    this.aspectRatioBuffer = new Float32Array(1);
+    this.mouseSpringVerticesBuffer = new Float32Array(4); // One line: x1, y1, x2, y2
+    this.uniformsBuffer = new Float32Array(3); // particle_size, world_width, world_height
 
     this.log("Buffers created successfully");
   }
@@ -427,11 +476,48 @@ class MorphogenesisRenderer {
     return true;
   }
 
+  updateGridLines(wasmModule) {
+    // Generate grid lines in world space coordinates
+    const worldDims = this.getCurrentWorldDimensions(wasmModule);
+    const worldHalfX = worldDims.width / 2.0;
+    const worldHalfY = worldDims.height / 2.0;
+    
+    const totalGridLines = (this.gridSize + 1) * 2;
+    const gridLinesArray = new Float32Array(totalGridLines * 4);
+    let gridIndex = 0;
+    
+    // Vertical lines (full height of world space)
+    for (let i = 0; i <= this.gridSize; i++) {
+      const x = (i / this.gridSize) * worldDims.width - worldHalfX;
+      gridLinesArray[gridIndex++] = x;
+      gridLinesArray[gridIndex++] = -worldHalfY; // Bottom of world space
+      gridLinesArray[gridIndex++] = x;
+      gridLinesArray[gridIndex++] = worldHalfY;  // Top of world space
+    }
+    
+    // Horizontal lines (full width of world space)
+    for (let i = 0; i <= this.gridSize; i++) {
+      const y = (i / this.gridSize) * worldDims.height - worldHalfY;
+      gridLinesArray[gridIndex++] = -worldHalfX;
+      gridLinesArray[gridIndex++] = y;
+      gridLinesArray[gridIndex++] = worldHalfX;
+      gridLinesArray[gridIndex++] = y;
+    }
+    
+    this.device.queue.writeBuffer(this.gridVertexBuffer, 0, gridLinesArray);
+    this.gridLinesCount = totalGridLines;
+  }
+
   updateData(wasmModule) {
-    // Update aspect ratio uniform
-    const aspectRatio = window.aspectRatio || this.canvas.width / this.canvas.height;
-    this.aspectRatioBuffer[0] = aspectRatio;
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.aspectRatioBuffer);
+    // Update grid lines to match current world dimensions
+    this.updateGridLines(wasmModule);
+    
+    // Update uniforms (particle size and world dimensions)
+    const worldDims = this.getCurrentWorldDimensions(wasmModule);
+    this.uniformsBuffer[0] = this.particleSize;
+    this.uniformsBuffer[1] = worldDims.width;
+    this.uniformsBuffer[2] = worldDims.height;
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformsBuffer);
 
     // Get particle data
     const particleCount = wasmModule.exports.get_particle_count();
@@ -462,11 +548,34 @@ class MorphogenesisRenderer {
       this.device.queue.writeBuffer(this.springVertexBuffer, 0, this.springVerticesBuffer, 0, springCount * 4);
     }
 
-    return { particleCount, springCount };
+    // Get mouse spring data if exists
+    let hasMouseSpring = false;
+    if (wasmModule.exports.get_mouse_connected_particle) {
+      const mouseParticle = wasmModule.exports.get_mouse_connected_particle();
+      if (mouseParticle >= 0) {
+        const mouseX = wasmModule.exports.get_mouse_position_x();
+        const mouseY = wasmModule.exports.get_mouse_position_y();
+        
+        // Get connected particle position
+        const particleX = this.particlePositionsBuffer[mouseParticle * 2];
+        const particleY = this.particlePositionsBuffer[mouseParticle * 2 + 1];
+        
+        // Create mouse spring line
+        this.mouseSpringVerticesBuffer[0] = particleX;
+        this.mouseSpringVerticesBuffer[1] = particleY;
+        this.mouseSpringVerticesBuffer[2] = mouseX;
+        this.mouseSpringVerticesBuffer[3] = mouseY;
+        
+        this.device.queue.writeBuffer(this.mouseSpringVertexBuffer, 0, this.mouseSpringVerticesBuffer);
+        hasMouseSpring = true;
+      }
+    }
+
+    return { particleCount, springCount, hasMouseSpring };
   }
 
   render(wasmModule) {
-    const { particleCount, springCount } = this.updateData(wasmModule);
+    const { particleCount, springCount, hasMouseSpring } = this.updateData(wasmModule);
 
     try {
       const commandEncoder = this.device.createCommandEncoder();
@@ -495,6 +604,14 @@ class MorphogenesisRenderer {
         passEncoder.setBindGroup(0, this.springBindGroup);
         passEncoder.setVertexBuffer(0, this.springVertexBuffer);
         passEncoder.draw(springCount * 2, 1, 0, 0);
+      }
+      
+      // Draw mouse spring connection (on top of regular springs)
+      if (hasMouseSpring) {
+        passEncoder.setPipeline(this.mouseSpringRenderPipeline);
+        passEncoder.setBindGroup(0, this.mouseSpringBindGroup);
+        passEncoder.setVertexBuffer(0, this.mouseSpringVertexBuffer);
+        passEncoder.draw(2, 1, 0, 0); // One line = 2 vertices
       }
       
       // Draw particles

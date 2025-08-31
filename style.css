@@ -13,14 +13,43 @@ canvas {
 
 #timing-display {
   position: absolute;
-  bottom: 10px;
-  right: 10px;
+  bottom: 1px;
+  right: 1px;
   background: rgba(0, 0, 0, 0.7);
-  color: #00ff00;
+  color: white;
   font-family: "Courier New", monospace;
-  font-size: 14px;
+  font-size: 12px;
   padding: 8px 12px;
   border-radius: 4px;
-  border: 1px solid #333;
+  border: 3x solid #333;
   z-index: 1000;
+}
+
+#controls {
+  position: absolute;
+  bottom: 1px;
+  left: 1px;
+  display: flex;
+  gap: 1px;
+  z-index: 1000;
+}
+
+#controls button {
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  border: 1px solid #555;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+#controls button:hover {
+  background: rgba(40, 40, 40, 0.9);
+}
+
+#controls button:active {
+  background: rgba(20, 20, 20, 0.9);
 }

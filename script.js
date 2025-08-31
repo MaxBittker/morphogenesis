@@ -6,6 +6,15 @@ let time = 0;
 let updateTimeMs = 0;
 const timingDisplay = document.getElementById("timing-display");
 
+// Mouse interaction state
+let mousePressed = false;
+let mouseX = 0;
+let mouseY = 0;
+
+// Simulation control state
+let isPaused = false;
+let stepRequested = false;
+
 function log(message) {
   console.log(message);
 }
@@ -17,12 +26,96 @@ function resizeCanvas() {
   canvas.style.width = window.innerWidth + "px";
   canvas.style.height = window.innerHeight + "px";
 
-  // Store aspect ratio for coordinate transformation
+  // Store aspect ratio for reference
   window.aspectRatio = canvas.width / canvas.height;
+  
+  // Set world dimensions to exactly match canvas pixel dimensions (1:1 mapping)
+  if (wasmModule && wasmModule.exports.set_world_dimensions) {
+    // World space = canvas pixel space
+    const worldWidth = canvas.width;
+    const worldHeight = canvas.height;
+    
+    wasmModule.exports.set_world_dimensions(worldWidth, worldHeight);
+    console.log(`World dimensions set to canvas size: ${worldWidth} x ${worldHeight} pixels`);
+  }
 }
 
 window.addEventListener("resize", resizeCanvas);
 resizeCanvas();
+
+// Convert mouse screen coordinates to world coordinates
+function screenToWorld(screenX, screenY) {
+  const rect = canvas.getBoundingClientRect();
+  
+  // Convert to canvas coordinates (0 to canvas size)
+  const canvasX = (screenX - rect.left) * (canvas.width / rect.width);
+  const canvasY = (screenY - rect.top) * (canvas.height / rect.height);
+  
+  // Convert to normalized device coordinates (-1 to 1)
+  const ndcX = (canvasX / canvas.width) * 2 - 1;
+  const ndcY = -((canvasY / canvas.height) * 2 - 1); // Flip Y axis
+  
+  // Convert screen coordinates directly to world coordinates (1:1 mapping)
+  // World coordinates = canvas pixel coordinates with origin at center
+  const worldX = canvasX - (canvas.width / 2);
+  const worldY = (canvas.height / 2) - canvasY; // Flip Y axis for standard coordinate system
+  
+  return { x: worldX, y: worldY };
+}
+
+// Mouse event handlers
+canvas.addEventListener('pointerdown', (event) => {
+  if (!wasmModule) return;
+  
+  mousePressed = true;
+  const worldPos = screenToWorld(event.clientX, event.clientY);
+  mouseX = worldPos.x;
+  mouseY = worldPos.y;
+  
+  // Tell WASM about mouse press
+  wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+});
+
+canvas.addEventListener('pointermove', (event) => {
+  if (!wasmModule) return;
+  
+  const worldPos = screenToWorld(event.clientX, event.clientY);
+  mouseX = worldPos.x;
+  mouseY = worldPos.y;
+  
+  // Update mouse position in WASM if pressed
+  if (mousePressed) {
+    wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+  }
+});
+
+canvas.addEventListener('pointerup', (event) => {
+  if (!wasmModule) return;
+  
+  mousePressed = false;
+  
+  // Tell WASM about mouse release
+  wasmModule.exports.set_mouse_interaction(mouseX, mouseY, false);
+});
+
+// Control button event handlers
+document.getElementById('pause-btn').addEventListener('click', () => {
+  isPaused = !isPaused;
+  const btn = document.getElementById('pause-btn');
+  btn.textContent = isPaused ? 'Resume' : 'Pause';
+});
+
+document.getElementById('step-btn').addEventListener('click', () => {
+  if (isPaused) {
+    stepRequested = true;
+  }
+});
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (wasmModule) {
+    wasmModule.exports.reset(); // Reset simulation to initial state
+  }
+});
 
 async function initRenderer() {
   // Create and initialize the renderer
@@ -57,6 +150,10 @@ async function loadWasm() {
 
     // Initialize the WASM module
     wasmModule.exports.init();
+    
+    // Set initial world dimensions based on current aspect ratio
+    resizeCanvas(); // This will call set_world_dimensions
+    
     return true;
   } catch (error) {
     log("WASM loading error: " + error.message);
@@ -70,18 +167,37 @@ function renderFrame() {
     return;
   }
 
-  time += 0.016; // ~60fps timing
+  // Check pause/step state
+  const shouldUpdate = !isPaused || stepRequested;
+  if (stepRequested) {
+    stepRequested = false;
+  }
 
-  // Time the particle update loop
-  const updateStart = performance.now();
-  wasmModule.exports.update_particles(0.016);
-  const updateEnd = performance.now();
-  updateTimeMs = Math.round(updateEnd - updateStart);
+  if (shouldUpdate) {
+    time += 0.016; // ~60fps timing
 
-  // Update timing display
-  timingDisplay.textContent = `Update: ${updateTimeMs}ms`;
+    // Time the particle update loop
+    const updateStart = performance.now();
+    wasmModule.exports.update_particles(0.016);
+    const updateEnd = performance.now();
+    updateTimeMs = Math.round(updateEnd - updateStart);
+  }
 
-  // Render using the renderer
+  // Update timing display with spatial occupancy
+  let statusText;
+  if (isPaused) {
+    statusText = "PAUSED";
+  } else {
+    const maxOccupancy = wasmModule.exports.get_spatial_max_occupancy();
+    const gridX = wasmModule.exports.get_grid_dimensions_x();
+    const gridY = wasmModule.exports.get_grid_dimensions_y();
+    const worldW = Math.round(wasmModule.exports.get_world_width_debug());
+    const worldH = Math.round(wasmModule.exports.get_world_height_debug());
+    statusText = `Update: ${updateTimeMs}ms | World: ${worldW}x${worldH} | Grid: ${gridX}x${gridY} | Max bin: ${maxOccupancy}`;
+  }
+  timingDisplay.textContent = statusText;
+
+  // Always render (even when paused) to show current state
   renderer.render(wasmModule);
 
   // Continue animation
