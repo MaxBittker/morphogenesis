@@ -8,11 +8,11 @@ pub const GRID_COUNT = 10;
 pub const GRID_PARTICLE_SIZE = 8;
 pub const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
 pub const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID;
-pub const FREE_AGENT_COUNT = 5000;
+pub const FREE_AGENT_COUNT = 1000;
 pub const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
 
 // Particle physical properties
-pub const PARTICLE_SIZE = 6.0; // Physical radius in pixels
+pub const PARTICLE_SIZE = 5.0; // Physical radius in pixels
 const PARTICLE_MASS = 1.0; // Normalized particle mass
 pub const WORLD_SIZE = 1.95; // Base world size (height for portrait, width for landscape)
 
@@ -22,11 +22,11 @@ var world_height: f32 = WORLD_SIZE;
 
 // XPBD solver parameters
 const XPBD_ITERATIONS = 1; // Constraint solver iterations per timestep
-const XPBD_SUBSTEPS = 3; // Number of substeps per frame
+const XPBD_SUBSTEPS = 6; // Number of substeps per frame
 
 // Constraint parameters (compliance = 1/(stiffness * dt²))
 const DISTANCE_STIFFNESS = 100000.0; // Very stiff rods
-const COLLISION_STIFFNESS = 100000.0; // Much stiffer for snappy collisions
+const COLLISION_STIFFNESS = 1.0; // Much stiffer for snappy collisions
 const MOUSE_STIFFNESS = 50000.0;
 
 // Constraint distances
@@ -38,12 +38,12 @@ pub const GRID_SPACING = PARTICLE_SIZE * 2.6; // Base spacing between grid parti
 const BOIDS_SEPARATION_RADIUS = PARTICLE_SIZE * 3.0; // Separation distance for boids
 const BOIDS_ALIGNMENT_RADIUS = PARTICLE_SIZE * 5.0; // Alignment radius for boids
 const BOIDS_COHESION_RADIUS = PARTICLE_SIZE * 7.0; // Cohesion radius for boids
-const BOIDS_SEPARATION_STIFFNESS = 5000.0;
+const BOIDS_SEPARATION_STIFFNESS = 1.0;
 const BOIDS_ALIGNMENT_STIFFNESS = 1000.0;
 const BOIDS_COHESION_STIFFNESS = 50.0;
 
 // Air resistance
-const AIR_DAMPING = 0.99;
+const AIR_DAMPING = 1.0;
 const GRAVITY = 9.8; // Gravity acceleration
 
 // Legacy constants for compatibility

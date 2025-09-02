@@ -21,44 +21,56 @@ function log(message) {
 
 // Set canvas size to match viewport
 function resizeCanvas() {
-  canvas.width = window.innerWidth * devicePixelRatio;
-  canvas.height = window.innerHeight * devicePixelRatio;
+  // Get the actual device pixel ratio (respects browser zoom)
+  const currentDPR = window.devicePixelRatio;
+  
+  // Canvas resolution follows device pixel ratio
+  canvas.width = window.innerWidth * currentDPR;
+  canvas.height = window.innerHeight * currentDPR;
   canvas.style.width = window.innerWidth + "px";
   canvas.style.height = window.innerHeight + "px";
 
   // Store aspect ratio for reference
   window.aspectRatio = canvas.width / canvas.height;
   
-  // Set world dimensions to exactly match canvas pixel dimensions (1:1 mapping)
+  // Set world dimensions based on CSS pixels (not device pixels)
+  // This makes the world size stay constant in logical units while zoom changes
   if (wasmModule && wasmModule.exports.set_world_dimensions) {
-    // World space = canvas pixel space
-    const worldWidth = canvas.width;
-    const worldHeight = canvas.height;
+    // Use CSS pixel dimensions for world space (zoom-independent logical size)
+    const worldWidth = window.innerWidth;
+    const worldHeight = window.innerHeight;
     
     wasmModule.exports.set_world_dimensions(worldWidth, worldHeight);
-    console.log(`World dimensions set to canvas size: ${worldWidth} x ${worldHeight} pixels`);
+    console.log(`World: ${worldWidth}x${worldHeight} logical pixels | Canvas: ${canvas.width}x${canvas.height} device pixels (DPR: ${currentDPR.toFixed(2)})`);
   }
 }
 
+// Listen for both resize and zoom changes
 window.addEventListener("resize", resizeCanvas);
+
+// Detect zoom changes by monitoring devicePixelRatio
+let lastDPR = window.devicePixelRatio;
+function checkZoomChange() {
+  if (window.devicePixelRatio !== lastDPR) {
+    lastDPR = window.devicePixelRatio;
+    resizeCanvas();
+  }
+}
+// Check for zoom changes periodically
+setInterval(checkZoomChange, 500);
 resizeCanvas();
 
 // Convert mouse screen coordinates to world coordinates
 function screenToWorld(screenX, screenY) {
   const rect = canvas.getBoundingClientRect();
   
-  // Convert to canvas coordinates (0 to canvas size)
-  const canvasX = (screenX - rect.left) * (canvas.width / rect.width);
-  const canvasY = (screenY - rect.top) * (canvas.height / rect.height);
+  // Convert to logical coordinates (CSS pixels)
+  const logicalX = screenX - rect.left;
+  const logicalY = screenY - rect.top;
   
-  // Convert to normalized device coordinates (-1 to 1)
-  const ndcX = (canvasX / canvas.width) * 2 - 1;
-  const ndcY = -((canvasY / canvas.height) * 2 - 1); // Flip Y axis
-  
-  // Convert screen coordinates directly to world coordinates (1:1 mapping)
-  // World coordinates = canvas pixel coordinates with origin at center
-  const worldX = canvasX - (canvas.width / 2);
-  const worldY = (canvas.height / 2) - canvasY; // Flip Y axis for standard coordinate system
+  // World coordinates use CSS pixels (logical size) with origin at center
+  const worldX = logicalX - (window.innerWidth / 2);
+  const worldY = (window.innerHeight / 2) - logicalY; // Flip Y axis for standard coordinate system
   
   return { x: worldX, y: worldY };
 }
