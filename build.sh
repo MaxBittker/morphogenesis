@@ -1,6 +1,9 @@
 #!/bin/bash
 echo "Building Zig WebGPU WASM Demo..."
 
+# Default to ReleaseFast if no optimization level specified
+OPTIMIZE=${1:-ReleaseFast}
+
 # Use Zig 0.14 for compatibility
 ZIG_PATH="/opt/homebrew/opt/zig@0.14/bin/zig"
 if [ -f "$ZIG_PATH" ]; then
@@ -15,8 +18,9 @@ fi
 
 echo "Using Zig: $($ZIG_CMD version)"
 
-# Build WASM module
-$ZIG_CMD build
+# Build WASM module with optimizations
+echo "Using optimization level: $OPTIMIZE"
+$ZIG_CMD build -Doptimize=$OPTIMIZE
 
 # Copy to project root
 cp zig-out/bin/webgpu-demo.wasm .

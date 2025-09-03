@@ -323,12 +323,16 @@ function renderFrame() {
     return;
   }
 
+  // Start timing the entire frame
+  const frameStart = performance.now();
+
   // Check pause/step state
   const shouldUpdate = !isPaused || stepRequested;
   if (stepRequested) {
     stepRequested = false;
   }
 
+  let physicsTimeMs = 0;
   if (shouldUpdate) {
     time += 0.016; // ~60fps timing
 
@@ -336,10 +340,20 @@ function renderFrame() {
     const updateStart = performance.now();
     wasmModule.exports.update_particles(0.016);
     const updateEnd = performance.now();
-    updateTimeMs = Math.round(updateEnd - updateStart);
+    physicsTimeMs = updateEnd - updateStart;
   }
 
-  // Update timing display with spatial occupancy
+  // Always render (even when paused) to show current state
+  const renderStart = performance.now();
+  renderer.render(wasmModule);
+  const renderEnd = performance.now();
+  const renderTimeMs = renderEnd - renderStart;
+  
+  // Calculate total frame time
+  const frameEnd = performance.now();
+  const totalFrameTimeMs = frameEnd - frameStart;
+
+  // Update timing display with detailed breakdown
   let statusText;
   if (isPaused) {
     statusText = "PAUSED";
@@ -349,12 +363,12 @@ function renderFrame() {
     const gridY = wasmModule.exports.get_grid_dimensions_y();
     const worldW = Math.round(wasmModule.exports.get_world_width_debug());
     const worldH = Math.round(wasmModule.exports.get_world_height_debug());
-    statusText = `Update: ${updateTimeMs}ms | World: ${worldW}x${worldH} | Grid: ${gridX}x${gridY} | Max bin: ${maxOccupancy}`;
+    const aliveParticles = wasmModule.exports.get_alive_particle_count();
+    const aliveSprings = wasmModule.exports.get_alive_spring_count();
+    
+    statusText = `${Math.round(totalFrameTimeMs)}ms | P:${aliveParticles} S:${aliveSprings} | ${worldW}x${worldH} | ${gridX}x${gridY} | bin:${maxOccupancy}`;
   }
   timingDisplay.textContent = statusText;
-
-  // Always render (even when paused) to show current state
-  renderer.render(wasmModule);
 
   // Continue animation
   animationId = requestAnimationFrame(renderFrame);

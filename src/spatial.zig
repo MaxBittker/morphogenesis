@@ -62,10 +62,6 @@ pub inline fn worldToGridY(world_y: f32) i32 {
     return @max(0, @min(@as(i32, @intCast(grid_size_y)) - 1, grid_pos));
 }
 
-// Legacy function for compatibility
-pub inline fn worldToGrid(world_pos: f32) i32 {
-    return worldToGridX(world_pos); // Default to X-axis behavior
-}
 
 pub fn getGridCell(x: f32, y: f32) *GridCell {
     const gx = worldToGridX(x);
@@ -124,6 +120,3 @@ pub fn getMaxOccupancy() u32 {
 }
 
 // Get grid dimensions
-pub fn getGridDimensions() struct { width: u32, height: u32 } {
-    return .{ .width = grid_size_x, .height = grid_size_y };
-}

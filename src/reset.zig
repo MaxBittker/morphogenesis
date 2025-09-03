@@ -33,11 +33,11 @@ pub fn initializeGridParticles() void {
     var grid_index: u32 = 0;
 
     // Space grids 150 pixels apart
-    const grid_spacing = 150.0;
+    const grid_spacing = 250.0;
     for (0..5) |row| {
         for (0..5) |col| {
             const x = (@as(f32, @floatFromInt(col)) - 2.0) * grid_spacing;
-            const y = (@as(f32, @floatFromInt(row)) - 2.0) * grid_spacing;
+            const y = (@as(f32, @floatFromInt(row)) - 1.0) * grid_spacing;
             grid_positions[grid_index] = [_]f32{ x, y };
             grid_index += 1;
         }
@@ -59,7 +59,8 @@ pub fn initializeGridParticles() void {
                 // Reduce row spacing for hexagonal pattern (cos(30°) ≈ 0.866)
                 const y = base_y + (@as(f32, @floatFromInt(row)) - grid_center_offset) * GRID_SPACING * 0.866;
 
-                main.setParticle(particle_index, Particle.initWithValence(x, y, @intCast(grid_id), 6));
+                const particle = Particle.initWithValence(x, y, @intCast(grid_id), 6);
+                _ = main.spawnParticle(particle);
                 particle_index += 1;
             }
         }
@@ -85,47 +86,27 @@ pub fn initializeFreeAgents() void {
         const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range_x;
         const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range_y;
 
-        main.setParticle(i, Particle.initWithValence(x, y, 255, 0));
+        const particle = Particle.initWithValence(x, y, 255, 0);
+        _ = main.spawnParticle(particle);
     }
 }
 
 // Initialize spring system (no pre-made connections, valence system handles bonding)
 pub fn initializeSprings() void {
-    main.setSpringCount(0);
-
     // Initialize connection lookup table
     for (0..PARTICLE_COUNT) |i| {
-        main.setParticleConnectionCount(i, 0);
+        main.setParticleConnectionCount(@intCast(i), 0);
     }
 
     // log("Springs system initialized - valence system will handle bond formation");
 }
 
 // Helper function to add a spring connection to a particle's lookup table
-pub fn addParticleConnection(particle_index: u32, spring_index: u32) void {
+pub fn addParticleConnection(particle_index: u32, spring_handle: main.SpringHandle) void {
     const count = main.getParticleConnectionCount(particle_index);
     if (count < MAX_CONNECTIONS_PER_PARTICLE) {
-        main.setParticleConnection(particle_index, count, spring_index);
+        main.setParticleConnection(particle_index, count, spring_handle);
         main.setParticleConnectionCount(particle_index, count + 1);
     }
 }
 
-// Find the closest particle to a given position
-pub fn findClosestParticle(target_x: f32, target_y: f32) u32 {
-    var closest_index: u32 = 0;
-    var closest_distance_sq: f32 = std.math.inf(f32);
-
-    for (0..PARTICLE_COUNT) |i| {
-        const particle = main.getParticle(i);
-        const dx = target_x - particle.x;
-        const dy = target_y - particle.y;
-        const distance_sq = dx * dx + dy * dy;
-
-        if (distance_sq < closest_distance_sq) {
-            closest_distance_sq = distance_sq;
-            closest_index = @intCast(i);
-        }
-    }
-
-    return closest_index;
-}

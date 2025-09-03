@@ -40,6 +40,9 @@ class MorphogenesisRenderer {
     // WASM constants (fetched from Zig)
     this.worldSize = 1.95;
     this.gridSize = 25;
+    
+    // Cached data for performance
+    this.cachedParticleData = null;
   }
 
   log(message) {
@@ -554,48 +557,50 @@ class MorphogenesisRenderer {
     this.uniformsBuffer[2] = worldDims.height;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformsBuffer);
 
-    // Get particle data (position + both valences)
-    const particleCount = wasmModule.exports.get_particle_count();
-    for (let i = 0; i < particleCount; i++) {
-      this.particlePositionsBuffer[i * 4] = wasmModule.exports.get_particle_data(i * 2);           // x
-      this.particlePositionsBuffer[i * 4 + 1] = wasmModule.exports.get_particle_data(i * 2 + 1);   // y
-      this.particlePositionsBuffer[i * 4 + 2] = wasmModule.exports.get_particle_valence(i);        // desired_valence
-      this.particlePositionsBuffer[i * 4 + 3] = wasmModule.exports.get_particle_current_valence(i); // current_valence
+    // BULK DATA TRANSFER: Get all particle data at once
+    const particleCount = wasmModule.exports.get_bulk_particle_count();
+    if (particleCount > 0) {
+      // Get direct pointer to WASM memory buffer - no copying in JS!
+      const particleDataPtr = wasmModule.exports.get_particle_data_bulk();
+      const particleDataView = new Float32Array(
+        wasmModule.exports.memory.buffer,
+        particleDataPtr,
+        particleCount * 4
+      );
+      
+      // Direct upload to GPU - single memcpy instead of thousands of function calls
+      this.device.queue.writeBuffer(this.instanceBuffer, 0, particleDataView);
+      
+      // Store reference for mouse spring lookup
+      this.cachedParticleData = particleDataView;
     }
-    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.particlePositionsBuffer, 0, particleCount * 4);
 
-    // Get spring data
-    const springCount = wasmModule.exports.get_spring_count ? wasmModule.exports.get_spring_count() : 0;
+    // BULK DATA TRANSFER: Get all spring data at once
+    const springCount = wasmModule.exports.get_bulk_spring_count();
     if (springCount > 0) {
-      for (let i = 0; i < springCount; i++) {
-        const particleA = wasmModule.exports.get_spring_particle_a(i);
-        const particleB = wasmModule.exports.get_spring_particle_b(i);
-        
-        // Reuse already fetched particle data (now with both valences in buffer)
-        const ax = this.particlePositionsBuffer[particleA * 4];
-        const ay = this.particlePositionsBuffer[particleA * 4 + 1];
-        const bx = this.particlePositionsBuffer[particleB * 4];
-        const by = this.particlePositionsBuffer[particleB * 4 + 1];
-        
-        this.springVerticesBuffer[i * 4] = ax;
-        this.springVerticesBuffer[i * 4 + 1] = ay;
-        this.springVerticesBuffer[i * 4 + 2] = bx;
-        this.springVerticesBuffer[i * 4 + 3] = by;
-      }
-      this.device.queue.writeBuffer(this.springVertexBuffer, 0, this.springVerticesBuffer, 0, springCount * 4);
+      // Get direct pointer to WASM memory buffer - no copying in JS!
+      const springDataPtr = wasmModule.exports.get_spring_data_bulk();
+      const springDataView = new Float32Array(
+        wasmModule.exports.memory.buffer,
+        springDataPtr,
+        springCount * 4
+      );
+      
+      // Direct upload to GPU - single memcpy instead of loop
+      this.device.queue.writeBuffer(this.springVertexBuffer, 0, springDataView);
     }
 
-    // Get mouse spring data if exists
+    // Get mouse spring data if exists (this is minimal, so keep individual calls)
     let hasMouseSpring = false;
     if (wasmModule.exports.get_mouse_connected_particle) {
       const mouseParticle = wasmModule.exports.get_mouse_connected_particle();
-      if (mouseParticle >= 0) {
+      if (mouseParticle >= 0 && this.cachedParticleData) {
         const mouseX = wasmModule.exports.get_mouse_position_x();
         const mouseY = wasmModule.exports.get_mouse_position_y();
         
-        // Get connected particle position
-        const particleX = this.particlePositionsBuffer[mouseParticle * 4];
-        const particleY = this.particlePositionsBuffer[mouseParticle * 4 + 1];
+        // Get connected particle position from cached data
+        const particleX = this.cachedParticleData[mouseParticle * 4];
+        const particleY = this.cachedParticleData[mouseParticle * 4 + 1];
         
         // Create mouse spring line
         this.mouseSpringVerticesBuffer[0] = particleX;
