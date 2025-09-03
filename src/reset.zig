@@ -15,7 +15,6 @@ const MAX_SPRINGS = main.MAX_SPRINGS;
 const MAX_CONNECTIONS_PER_PARTICLE = main.MAX_CONNECTIONS_PER_PARTICLE;
 
 const Particle = main.Particle;
-const ParticleType = main.ParticleType;
 const Spring = main.Spring;
 
 // Console logging
@@ -60,7 +59,7 @@ pub fn initializeGridParticles() void {
                 // Reduce row spacing for hexagonal pattern (cos(30°) ≈ 0.866)
                 const y = base_y + (@as(f32, @floatFromInt(row)) - grid_center_offset) * GRID_SPACING * 0.866;
 
-                main.setParticle(particle_index, Particle.init(x, y, ParticleType.grid_particle, @intCast(grid_id)));
+                main.setParticle(particle_index, Particle.initWithValence(x, y, @intCast(grid_id), 6));
                 particle_index += 1;
             }
         }
@@ -70,8 +69,9 @@ pub fn initializeGridParticles() void {
 // Initialize free agent Boids with random positions
 pub fn initializeFreeAgents() void {
     const start_index = TOTAL_GRID_PARTICLES;
+    const end_index = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT; // Only initialize initial free agents
 
-    for (start_index..PARTICLE_COUNT) |i| {
+    for (start_index..end_index) |i| {
         const seed = @as(f32, @floatFromInt(i));
         // Spawn across the world dimensions (with fallback for first frame)
         const world_width = main.get_world_width();
@@ -85,11 +85,11 @@ pub fn initializeFreeAgents() void {
         const x = ((@sin(seed * 12.9898) + 1.0) * 0.5 - 0.5) * range_x;
         const y = ((@sin(seed * 78.233) + 1.0) * 0.5 - 0.5) * range_y;
 
-        main.setParticle(i, Particle.init(x, y, ParticleType.free_agent, 255));
+        main.setParticle(i, Particle.initWithValence(x, y, 255, 0));
     }
 }
 
-// Create hexagonal lattice connections within each grid
+// Initialize spring system (no pre-made connections, valence system handles bonding)
 pub fn initializeSprings() void {
     main.setSpringCount(0);
 
@@ -98,102 +98,7 @@ pub fn initializeSprings() void {
         main.setParticleConnectionCount(i, 0);
     }
 
-    for (0..GRID_COUNT) |grid_id| {
-        const grid_start = grid_id * PARTICLES_PER_GRID;
-        const springs_before = main.getSpringCount();
-
-        // Create hexagonal lattice connections (6-connected)
-        for (0..GRID_PARTICLE_SIZE) |row| {
-            for (0..GRID_PARTICLE_SIZE) |col| {
-                const current_particle = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col));
-                const is_odd_row = (row % 2 == 1);
-
-                // Connect to left neighbor
-                if (col > 0) {
-                    const left_particle = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col - 1));
-                    addSpringConnection(current_particle, left_particle);
-                }
-
-                // Connect to right neighbor
-                if (col < GRID_PARTICLE_SIZE - 1) {
-                    const right_particle = @as(u32, @intCast(grid_start + row * GRID_PARTICLE_SIZE + col + 1));
-                    addSpringConnection(current_particle, right_particle);
-                }
-
-                // Connect to neighbors in the row above (hexagonal pattern)
-                if (row > 0) {
-                    if (is_odd_row) {
-                        // For odd rows: connect to upper-left and upper-right
-                        // Upper-left
-                        const upper_left = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, upper_left);
-                        // Upper-right
-                        if (col < GRID_PARTICLE_SIZE - 1) {
-                            const upper_right = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col + 1));
-                            addSpringConnection(current_particle, upper_right);
-                        }
-                    } else {
-                        // For even rows: connect to upper-left and upper-right
-                        // Upper-left
-                        if (col > 0) {
-                            const upper_left = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col - 1));
-                            addSpringConnection(current_particle, upper_left);
-                        }
-                        // Upper-right
-                        const upper_right = @as(u32, @intCast(grid_start + (row - 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, upper_right);
-                    }
-                }
-
-                // Connect to neighbors in the row below (hexagonal pattern)
-                if (row < GRID_PARTICLE_SIZE - 1) {
-                    if (is_odd_row) {
-                        // For odd rows: connect to lower-left and lower-right
-                        // Lower-left
-                        const lower_left = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, lower_left);
-                        // Lower-right
-                        if (col < GRID_PARTICLE_SIZE - 1) {
-                            const lower_right = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col + 1));
-                            addSpringConnection(current_particle, lower_right);
-                        }
-                    } else {
-                        // For even rows: connect to lower-left and lower-right
-                        // Lower-left
-                        if (col > 0) {
-                            const lower_left = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col - 1));
-                            addSpringConnection(current_particle, lower_left);
-                        }
-                        // Lower-right
-                        const lower_right = @as(u32, @intCast(grid_start + (row + 1) * GRID_PARTICLE_SIZE + col));
-                        addSpringConnection(current_particle, lower_right);
-                    }
-                }
-            }
-        }
-
-        const springs_created = main.getSpringCount() - springs_before;
-        log("Grid {}: created {} springs (total: {})", .{ grid_id, springs_created, main.getSpringCount() });
-    }
-
-    log("Total springs created: {} (max: {})", .{ main.getSpringCount(), MAX_SPRINGS });
-}
-
-// Helper function to add a spring connection between two particles
-pub fn addSpringConnection(particle_a: u32, particle_b: u32) void {
-    const current_spring_count = main.getSpringCount();
-    if (current_spring_count >= MAX_SPRINGS) {
-        log("WARNING: Hit MAX_SPRINGS limit ({}) when trying to connect {} to {}", .{ MAX_SPRINGS, particle_a, particle_b });
-        return;
-    }
-
-    main.setSpring(current_spring_count, Spring.init(particle_a, particle_b, SPRING_REST_LENGTH));
-
-    // Update connection lookup for both particles
-    addParticleConnection(particle_a, current_spring_count);
-    addParticleConnection(particle_b, current_spring_count);
-
-    main.setSpringCount(current_spring_count + 1);
+    // log("Springs system initialized - valence system will handle bond formation");
 }
 
 // Helper function to add a spring connection to a particle's lookup table

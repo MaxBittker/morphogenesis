@@ -15,6 +15,18 @@ let mouseY = 0;
 let isPaused = false;
 let stepRequested = false;
 
+// Tool states
+const TOOLS = {
+  DRAG: 'drag',
+  SPAWN: 'spawn'
+};
+let currentTool = TOOLS.DRAG;
+
+// Particle painting state
+let lastSpawnX = null;
+let lastSpawnY = null;
+let spawnValence = 0; // Default spawn valence
+
 function log(message) {
   console.log(message);
 }
@@ -75,6 +87,82 @@ function screenToWorld(screenX, screenY) {
   return { x: worldX, y: worldY };
 }
 
+// Set tool to drag/grab
+function setDragTool() {
+  currentTool = TOOLS.DRAG;
+  updateToolButtons();
+  updateToolDisplay();
+}
+
+// Set tool to spawn with specified valence
+function setSpawnTool(valence) {
+  currentTool = TOOLS.SPAWN;
+  spawnValence = valence;
+  updateToolButtons();
+  updateToolDisplay();
+}
+
+// Update button visual states
+function updateToolButtons() {
+  // Remove active class from all buttons
+  document.querySelectorAll('.tool-btn').forEach(btn => btn.classList.remove('active'));
+  
+  // Add active class to current tool button
+  if (currentTool === TOOLS.DRAG) {
+    document.getElementById('grab-btn').classList.add('active');
+  } else if (currentTool === TOOLS.SPAWN) {
+    document.getElementById(`spawn-${spawnValence}-btn`).classList.add('active');
+  }
+}
+
+// Keyboard event handlers for tool switching
+document.addEventListener('keydown', (event) => {
+  if (!wasmModule) return;
+  
+  const key = event.key.toLowerCase();
+  
+  if (key === 'q' || key === 'g') {
+    setDragTool();
+  } else if (key >= '0' && key <= '6') {
+    setSpawnTool(parseInt(key));
+  }
+});
+
+// Update tool display in UI
+function updateToolDisplay() {
+  const toolDisplay = document.getElementById('tool-display');
+  if (toolDisplay) {
+    const toolName = currentTool === TOOLS.DRAG ? 'Grab' : `Spawn valence ${spawnValence}`;
+    toolDisplay.textContent = `Tool: ${toolName}`;
+  }
+}
+
+// Spawn a particle if far enough from the last spawn point
+function trySpawnParticle(worldX, worldY) {
+  if (!wasmModule) return false;
+  
+  // Check if we should spawn based on distance from last spawn
+  if (lastSpawnX !== null && lastSpawnY !== null) {
+    const dx = worldX - lastSpawnX;
+    const dy = worldY - lastSpawnY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    // Use 2x particle diameter as threshold (diameter = 2 * radius)
+    const particleSize = wasmModule.exports.get_particle_size();
+    const spawnThreshold = particleSize ;
+    
+    if (distance < spawnThreshold) {
+      return false; // Too close to last spawn point
+    }
+  }
+  
+  wasmModule.exports.add_particle(worldX, worldY, spawnValence);
+  
+  lastSpawnX = worldX;
+  lastSpawnY = worldY;
+  return true;
+}
+
 // Mouse event handlers
 canvas.addEventListener('pointerdown', (event) => {
   if (!wasmModule) return;
@@ -84,8 +172,17 @@ canvas.addEventListener('pointerdown', (event) => {
   mouseX = worldPos.x;
   mouseY = worldPos.y;
   
-  // Tell WASM about mouse press
-  wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+  // Handle based on current tool
+  if (currentTool === TOOLS.DRAG) {
+    // Tell WASM about mouse press for dragging
+    wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+  } else if (currentTool === TOOLS.SPAWN) {
+    // Start particle painting - spawn first particle and reset spawn tracking
+    const spawned = trySpawnParticle(mouseX, mouseY);
+    if (spawned) {
+      console.log(`Started painting at (${mouseX.toFixed(1)}, ${mouseY.toFixed(1)})`);
+    }
+  }
 });
 
 canvas.addEventListener('pointermove', (event) => {
@@ -95,9 +192,15 @@ canvas.addEventListener('pointermove', (event) => {
   mouseX = worldPos.x;
   mouseY = worldPos.y;
   
-  // Update mouse position in WASM if pressed
+  // Handle based on current tool and mouse state
   if (mousePressed) {
-    wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+    if (currentTool === TOOLS.DRAG) {
+      // Update mouse position in WASM for dragging
+      wasmModule.exports.set_mouse_interaction(mouseX, mouseY, true);
+    } else if (currentTool === TOOLS.SPAWN) {
+      // Continue painting particles if we've moved far enough
+      trySpawnParticle(mouseX, mouseY);
+    }
   }
 });
 
@@ -106,8 +209,16 @@ canvas.addEventListener('pointerup', (event) => {
   
   mousePressed = false;
   
-  // Tell WASM about mouse release
-  wasmModule.exports.set_mouse_interaction(mouseX, mouseY, false);
+  // Handle based on current tool
+  if (currentTool === TOOLS.DRAG) {
+    // Tell WASM about mouse release for dragging
+    wasmModule.exports.set_mouse_interaction(mouseX, mouseY, false);
+  } else if (currentTool === TOOLS.SPAWN) {
+    // End painting - reset spawn tracking for next painting session
+    lastSpawnX = null;
+    lastSpawnY = null;
+    console.log('Ended particle painting');
+  }
 });
 
 // Control button event handlers
@@ -127,6 +238,39 @@ document.getElementById('reset-btn').addEventListener('click', () => {
   if (wasmModule) {
     wasmModule.exports.reset(); // Reset simulation to initial state
   }
+});
+
+// Toolbar button event handlers
+document.getElementById('grab-btn').addEventListener('click', () => {
+  setDragTool();
+});
+
+document.getElementById('spawn-0-btn').addEventListener('click', () => {
+  setSpawnTool(0);
+});
+
+document.getElementById('spawn-1-btn').addEventListener('click', () => {
+  setSpawnTool(1);
+});
+
+document.getElementById('spawn-2-btn').addEventListener('click', () => {
+  setSpawnTool(2);
+});
+
+document.getElementById('spawn-3-btn').addEventListener('click', () => {
+  setSpawnTool(3);
+});
+
+document.getElementById('spawn-4-btn').addEventListener('click', () => {
+  setSpawnTool(4);
+});
+
+document.getElementById('spawn-5-btn').addEventListener('click', () => {
+  setSpawnTool(5);
+});
+
+document.getElementById('spawn-6-btn').addEventListener('click', () => {
+  setSpawnTool(6);
 });
 
 async function initRenderer() {
@@ -235,6 +379,10 @@ async function init() {
   log(
     `WASM initialized ${wasmModule.exports.get_particle_count()} particles`
   );
+
+  // Initialize UI
+  updateToolDisplay();
+  updateToolButtons();
 
   log("Starting animation loop...");
   renderFrame(); // Start the animation

@@ -25,6 +25,20 @@ canvas {
   z-index: 1000;
 }
 
+#tool-display {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  z-index: 1000;
+}
+
 #controls {
   position: absolute;
   bottom: 1px;
@@ -52,4 +66,35 @@ canvas {
 
 #controls button:active {
   background: rgba(20, 20, 20, 0.9);
+}
+
+#toolbar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 2px;
+  z-index: 1000;
+}
+
+.tool-btn {
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  border: 1px solid #555;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-width: 24px;
+}
+
+.tool-btn:hover {
+  background: rgba(40, 40, 40, 0.9);
+}
+
+.tool-btn.active {
+  background: rgba(60, 60, 60, 0.9);
+  border-color: #888;
 }

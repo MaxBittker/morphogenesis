@@ -120,6 +120,8 @@ class MorphogenesisRenderer {
       struct VertexInput {
           @location(0) position: vec2<f32>,
           @location(1) particle_pos: vec2<f32>,
+          @location(2) desired_valence: f32,
+          @location(3) current_valence: f32,
       }
 
       struct VertexOutput {
@@ -143,13 +145,42 @@ class MorphogenesisRenderer {
           output.position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
           output.uv = input.position;
           
-          // Color based on particle index for stable identity-based colors
-          let hue = f32(instance_id) * 0.01745329;
-          output.color = vec3<f32>(
-              0.5 + 0.5 * sin(hue),
-              0.5 + 0.5 * sin(hue + 2.09439510),
-              0.5 + 0.5 * sin(hue + 4.18879020)
-          );
+          // Color based on desired valence - different colors for different bond counts
+          let desired_valence = input.desired_valence;
+          let current_valence = input.current_valence;
+          var base_color: vec3<f32>;
+          
+          if (desired_valence == 0.0) {
+              base_color = vec3<f32>(0.3, 0.3, 0.3); // Gray for inert (valence 0)
+          } else if (desired_valence == 1.0) {
+              base_color = vec3<f32>(1.0, 0.2, 0.2); // Red for valence 1
+          } else if (desired_valence == 2.0) {
+              base_color = vec3<f32>(0.2, 1.0, 0.2); // Green for valence 2
+          } else if (desired_valence == 3.0) {
+              base_color = vec3<f32>(0.2, 0.2, 1.0); // Blue for valence 3
+          } else if (desired_valence == 4.0) {
+              base_color = vec3<f32>(1.0, 1.0, 0.2); // Yellow for valence 4
+          } else if (desired_valence == 5.0) {
+              base_color = vec3<f32>(1.0, 0.2, 1.0); // Magenta for valence 5
+          } else if (desired_valence == 6.0) {
+              base_color = vec3<f32>(0.2, 1.0, 1.0); // Cyan for valence 6
+          } else {
+              // For valence > 6, use a rainbow based on valence
+              let hue = (desired_valence - 6.0) * 0.5;
+              base_color = vec3<f32>(
+                  0.5 + 0.5 * sin(hue),
+                  0.5 + 0.5 * sin(hue + 2.09439510),
+                  0.5 + 0.5 * sin(hue + 4.18879020)
+              );
+          }
+          
+          // Dim particles when valence is satisfied (current >= desired)
+          var brightness_factor: f32 = 1.0;
+          if (current_valence >= desired_valence && desired_valence > 0.0) {
+              brightness_factor = 0.6; // Dimmer when satisfied
+          }
+          
+          output.color = base_color * brightness_factor;
           
           return output;
       }
@@ -275,9 +306,13 @@ class MorphogenesisRenderer {
             attributes: [{ format: "float32x2", offset: 0, shaderLocation: 0 }],
           },
           {
-            arrayStride: 2 * 4,
+            arrayStride: 4 * 4,
             stepMode: "instance", 
-            attributes: [{ format: "float32x2", offset: 0, shaderLocation: 1 }],
+            attributes: [
+              { format: "float32x2", offset: 0, shaderLocation: 1 }, // position
+              { format: "float32", offset: 8, shaderLocation: 2 }, // desired_valence
+              { format: "float32", offset: 12, shaderLocation: 3 }, // current_valence
+            ],
           },
         ],
       },
@@ -390,9 +425,9 @@ class MorphogenesisRenderer {
     });
     this.device.queue.writeBuffer(this.vertexBuffer, 0, quadVertices);
 
-    // Instance buffer for particle positions
+    // Instance buffer for particle positions + valences (4 floats per particle: x, y, desired_valence, current_valence)
     this.instanceBuffer = this.device.createBuffer({
-      size: this.maxParticles * 2 * 4,
+      size: this.maxParticles * 4 * 4,
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
 
@@ -443,8 +478,8 @@ class MorphogenesisRenderer {
       entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }],
     });
 
-    // Pre-allocate reusable TypedArray buffers
-    this.particlePositionsBuffer = new Float32Array(this.maxParticles * 2);
+    // Pre-allocate reusable TypedArray buffers (x, y, desired_valence, current_valence per particle)
+    this.particlePositionsBuffer = new Float32Array(this.maxParticles * 4);
     this.springVerticesBuffer = new Float32Array(this.maxSprings * 4);
     this.mouseSpringVerticesBuffer = new Float32Array(4); // One line: x1, y1, x2, y2
     this.uniformsBuffer = new Float32Array(3); // particle_size, world_width, world_height
@@ -519,13 +554,15 @@ class MorphogenesisRenderer {
     this.uniformsBuffer[2] = worldDims.height;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformsBuffer);
 
-    // Get particle data
+    // Get particle data (position + both valences)
     const particleCount = wasmModule.exports.get_particle_count();
     for (let i = 0; i < particleCount; i++) {
-      this.particlePositionsBuffer[i * 2] = wasmModule.exports.get_particle_data(i * 2);
-      this.particlePositionsBuffer[i * 2 + 1] = wasmModule.exports.get_particle_data(i * 2 + 1);
+      this.particlePositionsBuffer[i * 4] = wasmModule.exports.get_particle_data(i * 2);           // x
+      this.particlePositionsBuffer[i * 4 + 1] = wasmModule.exports.get_particle_data(i * 2 + 1);   // y
+      this.particlePositionsBuffer[i * 4 + 2] = wasmModule.exports.get_particle_valence(i);        // desired_valence
+      this.particlePositionsBuffer[i * 4 + 3] = wasmModule.exports.get_particle_current_valence(i); // current_valence
     }
-    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.particlePositionsBuffer, 0, particleCount * 2);
+    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.particlePositionsBuffer, 0, particleCount * 4);
 
     // Get spring data
     const springCount = wasmModule.exports.get_spring_count ? wasmModule.exports.get_spring_count() : 0;
@@ -534,11 +571,11 @@ class MorphogenesisRenderer {
         const particleA = wasmModule.exports.get_spring_particle_a(i);
         const particleB = wasmModule.exports.get_spring_particle_b(i);
         
-        // Reuse already fetched particle data
-        const ax = this.particlePositionsBuffer[particleA * 2];
-        const ay = this.particlePositionsBuffer[particleA * 2 + 1];
-        const bx = this.particlePositionsBuffer[particleB * 2];
-        const by = this.particlePositionsBuffer[particleB * 2 + 1];
+        // Reuse already fetched particle data (now with both valences in buffer)
+        const ax = this.particlePositionsBuffer[particleA * 4];
+        const ay = this.particlePositionsBuffer[particleA * 4 + 1];
+        const bx = this.particlePositionsBuffer[particleB * 4];
+        const by = this.particlePositionsBuffer[particleB * 4 + 1];
         
         this.springVerticesBuffer[i * 4] = ax;
         this.springVerticesBuffer[i * 4 + 1] = ay;
@@ -557,8 +594,8 @@ class MorphogenesisRenderer {
         const mouseY = wasmModule.exports.get_mouse_position_y();
         
         // Get connected particle position
-        const particleX = this.particlePositionsBuffer[mouseParticle * 2];
-        const particleY = this.particlePositionsBuffer[mouseParticle * 2 + 1];
+        const particleX = this.particlePositionsBuffer[mouseParticle * 4];
+        const particleY = this.particlePositionsBuffer[mouseParticle * 4 + 1];
         
         // Create mouse spring line
         this.mouseSpringVerticesBuffer[0] = particleX;

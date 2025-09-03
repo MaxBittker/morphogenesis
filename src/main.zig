@@ -4,12 +4,13 @@ const spatial = @import("spatial.zig");
 const reset_module = @import("reset.zig");
 
 // XPBD particle system: grids + free agents
-pub const GRID_COUNT = 10;
+pub const GRID_COUNT = 2;
 pub const GRID_PARTICLE_SIZE = 8;
 pub const PARTICLES_PER_GRID = GRID_PARTICLE_SIZE * GRID_PARTICLE_SIZE;
 pub const TOTAL_GRID_PARTICLES = GRID_COUNT * PARTICLES_PER_GRID;
-pub const FREE_AGENT_COUNT = 1000;
-pub const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
+pub const FREE_AGENT_COUNT = 100; // Initial free agents
+pub const EXTRA_PARTICLE_SLOTS = 10000; // Extra slots for user-added particles
+pub const PARTICLE_COUNT = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT + EXTRA_PARTICLE_SLOTS;
 
 // Particle physical properties
 pub const PARTICLE_SIZE = 5.0; // Physical radius in pixels
@@ -25,12 +26,12 @@ const XPBD_ITERATIONS = 1; // Constraint solver iterations per timestep
 const XPBD_SUBSTEPS = 6; // Number of substeps per frame
 
 // Constraint parameters (compliance = 1/(stiffness * dt²))
-const DISTANCE_STIFFNESS = 100000.0; // Very stiff rods
+const DISTANCE_STIFFNESS = 10000000.0; // Very stiff rods
 const COLLISION_STIFFNESS = 1.0; // Much stiffer for snappy collisions
 const MOUSE_STIFFNESS = 50000.0;
 
 // Constraint distances
-pub const SPRING_REST_LENGTH = PARTICLE_SIZE * 1.1; // Natural spring length between connected particles
+pub const SPRING_REST_LENGTH = PARTICLE_SIZE * 3.1; // Natural spring length between connected particles
 const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5; // Minimum distance between particles
 pub const GRID_SPACING = PARTICLE_SIZE * 2.6; // Base spacing between grid particles (avoid overlaps)
 
@@ -39,12 +40,12 @@ const BOIDS_SEPARATION_RADIUS = PARTICLE_SIZE * 3.0; // Separation distance for 
 const BOIDS_ALIGNMENT_RADIUS = PARTICLE_SIZE * 5.0; // Alignment radius for boids
 const BOIDS_COHESION_RADIUS = PARTICLE_SIZE * 7.0; // Cohesion radius for boids
 const BOIDS_SEPARATION_STIFFNESS = 1.0;
-const BOIDS_ALIGNMENT_STIFFNESS = 1000.0;
+const BOIDS_ALIGNMENT_STIFFNESS = 10.0;
 const BOIDS_COHESION_STIFFNESS = 50.0;
 
 // Air resistance
-const AIR_DAMPING = 1.0;
-const GRAVITY = 9.8; // Gravity acceleration
+const AIR_DAMPING = 0.999; // Slight damping to prevent infinite acceleration
+const GRAVITY = 1.0; // Gravity acceleration (in pixels/s²)
 
 // Legacy constants for compatibility
 const SPRING_STRENGTH = DISTANCE_STIFFNESS;
@@ -226,12 +227,6 @@ pub const Vec2 = struct {
     y: f32,
 };
 
-// Particle type enumeration
-pub const ParticleType = enum {
-    grid_particle, // Part of a spring-connected grid
-    free_agent, // Independent Boid
-};
-
 // XPBD Particle structure
 pub const Particle = struct {
     x: f32,
@@ -241,12 +236,13 @@ pub const Particle = struct {
     vx: f32,
     vy: f32,
     mass: f32,
-    particle_type: ParticleType,
     grid_id: u8, // Which grid this particle belongs to (0-4, or 255 for free agents)
+    desired_valence: u8, // How many connections this particle wants
+    current_valence: u8, // How many connections this particle currently has
 
     const Self = @This();
 
-    pub fn init(x: f32, y: f32, ptype: ParticleType, grid: u8) Self {
+    pub fn init(x: f32, y: f32, grid: u8) Self {
         return Self{
             .x = x,
             .y = y,
@@ -255,12 +251,31 @@ pub const Particle = struct {
             .vx = (x * 0.1), // Simple deterministic initial velocity
             .vy = (y * 0.1),
             .mass = PARTICLE_MASS,
-            .particle_type = ptype,
             .grid_id = grid,
+            .desired_valence = 2, // Default valence
+            .current_valence = 0, // Start with no connections
+        };
+    }
+
+    pub fn initWithValence(x: f32, y: f32, grid: u8, valence: u8) Self {
+        return Self{
+            .x = x,
+            .y = y,
+            .predicted_x = x,
+            .predicted_y = y,
+            .vx = (x * 0.1), // Simple deterministic initial velocity
+            .vy = (y * 0.1),
+            .mass = PARTICLE_MASS,
+            .grid_id = grid,
+            .desired_valence = valence,
+            .current_valence = 0, // Start with no connections
         };
     }
 
     pub fn predictPosition(self: *Self, dt: f32) void {
+        // Apply gravity (downward acceleration)
+        self.vy -= GRAVITY * dt;
+
         // Apply air damping to velocity
         self.vx *= AIR_DAMPING;
         self.vy *= AIR_DAMPING;
@@ -321,8 +336,8 @@ pub const Particle = struct {
 };
 
 // XPBD constraint arrays
-const MAX_DISTANCE_CONSTRAINTS = GRID_COUNT * PARTICLES_PER_GRID * 6; // Hexagonal: up to 6 connections per particle
-const MAX_COLLISION_CONSTRAINTS = 10000; // Dynamic collision detection
+const MAX_DISTANCE_CONSTRAINTS = MAX_SPRINGS; // Match spring capacity for distance constraints
+const MAX_COLLISION_CONSTRAINTS = 50000; // Handle more particles with collisions
 
 var distance_constraints: [MAX_DISTANCE_CONSTRAINTS]DistanceConstraint = undefined;
 var distance_constraint_count: u32 = 0;
@@ -350,12 +365,16 @@ var boids_cohesion_constraint_count: u32 = 0;
 // Global particle system
 var particles: [PARTICLE_COUNT]Particle = undefined;
 var particles_initialized = false;
+var active_particle_count: u32 = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT; // Start with base particles only
 
-// Spring system - maximum springs for hexagonal lattice (6-connectivity)
+// Spring system - maximum springs for hexagonal lattice (6-connectivity) + user additions
 // Each particle has up to 6 connections, but springs are shared between particles
 // In practice, each particle contributes ~3 unique springs to avoid double-counting
 // Safety margin: use 4 springs per particle to ensure we don't hit the limit
-pub const MAX_SPRINGS = GRID_COUNT * PARTICLES_PER_GRID * 4;
+// User-added particles: each gets 2 springs (to nearest neighbors)
+const GRID_MAX_SPRINGS = GRID_COUNT * PARTICLES_PER_GRID * 4;
+const USER_ADDED_MAX_SPRINGS = EXTRA_PARTICLE_SLOTS * 2; // 2 springs per user-added particle
+pub const MAX_SPRINGS = GRID_MAX_SPRINGS + USER_ADDED_MAX_SPRINGS; // ~20,000+ springs total
 
 // Legacy Spring structure for backward compatibility
 pub const Spring = struct {
@@ -497,14 +516,16 @@ fn generateConstraints(dt: f32) void {
     }
 
     // Generate collision constraints using spatial grid
-    spatial.populateGrid(particles, PARTICLE_COUNT);
+    spatial.populateGrid(particles, active_particle_count);
 
-    for (0..PARTICLE_COUNT) |i| {
+    for (0..active_particle_count) |i| {
         generateCollisionConstraintsForParticle(@intCast(i), dt);
     }
 
-    // Generate boids constraints for free agents only
-    for (TOTAL_GRID_PARTICLES..PARTICLE_COUNT) |i| {
+    // Generate boids constraints for initial free agents only (not user-added particles)
+    const initial_free_agents_end = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
+    const boids_end = @min(active_particle_count, initial_free_agents_end);
+    for (TOTAL_GRID_PARTICLES..boids_end) |i| {
         generateBoidsConstraintsForParticle(@intCast(i), dt);
     }
 }
@@ -568,8 +589,8 @@ fn generateCollisionConstraintsForParticle(particle_index: u32, dt: f32) void {
 fn generateBoidsConstraintsForParticle(particle_index: u32, dt: f32) void {
     const particle = &particles[particle_index];
 
-    // Only apply to free agents
-    if (particle.particle_type != ParticleType.free_agent) return;
+    // Only apply to free agents (valence 0)
+    if (particle.desired_valence != 0) return;
 
     var neighbors: [16]u32 = undefined;
     var neighbor_count: u32 = 0;
@@ -977,9 +998,15 @@ export fn reset() void {
     mouse_pressed = false;
     mouse_has_connection = false;
 
+    // Reset active particle count to base particles only
+    active_particle_count = TOTAL_GRID_PARTICLES + FREE_AGENT_COUNT;
+
     // Reinitialize all particles to starting positions
     reset_module.initializeGridParticles();
     reset_module.initializeFreeAgents();
+
+    // Initialize valence counts for existing springs
+    initializeValenceCounts();
 
     log("Particle system reset complete", .{});
 }
@@ -994,12 +1021,15 @@ export fn update_particles(dt: f32) void {
     // 4. Position finalization
 
     // Step 1: Predict positions for all particles
-    for (0..PARTICLE_COUNT) |i| {
+    for (0..active_particle_count) |i| {
         var particle = &particles[i];
         particle.predictPosition(dt);
     }
 
-    // Step 2: Generate constraints and solve them iteratively
+    // Step 2: Update valence-based bonds (check for new connections)
+    updateValenceBonds();
+
+    // Generate constraints and solve them iteratively
     generateConstraints(dt);
 
     // Solve constraints for multiple iterations for stability
@@ -1013,7 +1043,7 @@ export fn update_particles(dt: f32) void {
     }
 
     // Step 3: Update velocities and positions from predictions
-    for (0..PARTICLE_COUNT) |i| {
+    for (0..active_particle_count) |i| {
         var particle = &particles[i];
         particle.updateFromPrediction(dt);
     }
@@ -1098,7 +1128,7 @@ export fn get_spring_particle_b(spring_index: i32) i32 {
 }
 
 export fn get_particle_data(index: i32) f32 {
-    if (!particles_initialized or index < 0 or index >= PARTICLE_COUNT * 2) {
+    if (!particles_initialized or index < 0 or index >= @as(i32, @intCast(active_particle_count)) * 2) {
         return 0.0;
     }
 
@@ -1109,6 +1139,120 @@ export fn get_particle_data(index: i32) f32 {
         return particles[particle_index].x;
     } else {
         return particles[particle_index].y;
+    }
+}
+
+// Get particle desired valence for rendering
+export fn get_particle_valence(particle_index: i32) i32 {
+    if (!particles_initialized or particle_index < 0 or particle_index >= @as(i32, @intCast(active_particle_count))) {
+        return 0;
+    }
+    return @as(i32, particles[@as(usize, @intCast(particle_index))].desired_valence);
+}
+
+// Get particle current valence for rendering
+export fn get_particle_current_valence(particle_index: i32) i32 {
+    if (!particles_initialized or particle_index < 0 or particle_index >= @as(i32, @intCast(active_particle_count))) {
+        return 0;
+    }
+    return @as(i32, particles[@as(usize, @intCast(particle_index))].current_valence);
+}
+
+// Add a new particle at position with springs to k nearest particles
+export fn add_particle(x: f32, y: f32, valence: u32) void {
+    if (!particles_initialized) return;
+
+    // Check if we have room for more particles
+    if (active_particle_count >= PARTICLE_COUNT) {
+        log("Cannot add more particles - reached limit of {}", .{PARTICLE_COUNT});
+        return;
+    }
+
+    // Initialize new particle with desired valence
+    const new_particle_idx = active_particle_count;
+    particles[new_particle_idx] = Particle.initWithValence(x, y, 255, @intCast(valence));
+
+    log("Added particle {} at ({d:.1}, {d:.1}) with valence {}", .{ new_particle_idx, x, y, valence });
+
+    // Increment active particle count
+    active_particle_count += 1;
+}
+
+// Check for and form valence-based bonds between particles
+fn updateValenceBonds() void {
+    const bond_distance_threshold = PARTICLE_SIZE * 4.0; // Distance to form bonds
+
+    // Check all particle pairs for potential bonds
+    for (0..active_particle_count) |i| {
+        var particle_a = &particles[i];
+
+        // Skip if this particle is already satisfied
+        if (particle_a.current_valence >= particle_a.desired_valence) continue;
+
+        for ((i + 1)..active_particle_count) |j| {
+            var particle_b = &particles[j];
+
+            // Skip if the other particle is already satisfied
+            if (particle_b.current_valence >= particle_b.desired_valence) continue;
+
+            // Check if particles are close enough to bond
+            const dx = particle_b.x - particle_a.x;
+            const dy = particle_b.y - particle_a.y;
+            const distance = @sqrt(dx * dx + dy * dy);
+
+            if (distance <= bond_distance_threshold) {
+                // Check if they're not already connected
+                var already_connected = false;
+                for (0..spring_count) |s| {
+                    const spring = &springs[s];
+                    if ((spring.particle_a == i and spring.particle_b == j) or
+                        (spring.particle_a == j and spring.particle_b == i))
+                    {
+                        already_connected = true;
+                        break;
+                    }
+                }
+
+                // Form a bond if not already connected and there's room
+                if (!already_connected and spring_count < MAX_SPRINGS) {
+                    springs[spring_count] = Spring{
+                        .particle_a = @intCast(i),
+                        .particle_b = @intCast(j),
+                        .rest_length = SPRING_REST_LENGTH,
+                    };
+                    reset_module.addParticleConnection(@intCast(i), spring_count);
+                    reset_module.addParticleConnection(@intCast(j), spring_count);
+
+                    // Update valence counts
+                    particle_a.current_valence += 1;
+                    particle_b.current_valence += 1;
+
+                    spring_count += 1;
+
+                    // Stop checking if both particles are now satisfied
+                    if (particle_a.current_valence >= particle_a.desired_valence) break;
+                }
+            }
+        }
+    }
+}
+
+// Initialize valence counts based on existing springs
+fn initializeValenceCounts() void {
+    // Reset all current valence counts
+    for (0..active_particle_count) |i| {
+        particles[i].current_valence = 0;
+    }
+
+    // Count existing springs
+    for (0..spring_count) |i| {
+        const spring = &springs[i];
+        if (spring.particle_a < active_particle_count) {
+            particles[spring.particle_a].current_valence += 1;
+        }
+        if (spring.particle_b < active_particle_count) {
+            particles[spring.particle_b].current_valence += 1;
+        }
     }
 }
 
