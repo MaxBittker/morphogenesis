@@ -4,6 +4,7 @@ const spatial = @import("spatial.zig");
 const reset_module = @import("reset.zig");
 const generational = @import("generational.zig");
 const mouse = @import("mouse.zig");
+const physics = @import("physics.zig");
 
 pub const GRID_COUNT = 5;
 pub const GRID_PARTICLE_SIZE = 12;
@@ -27,6 +28,9 @@ const DISTANCE_STIFFNESS = 10000000.0;
 const COLLISION_STIFFNESS = 1.0;
 const MOUSE_STIFFNESS = 50000.0;
 
+const AIR_DAMPING = 0.99;
+const GRAVITY = 25.0;
+
 pub const SPRING_REST_LENGTH = PARTICLE_SIZE * 3.1;
 const SEPARATION_RADIUS = PARTICLE_SIZE * 1.5;
 pub const GRID_SPACING = PARTICLE_SIZE * 2.6;
@@ -38,186 +42,8 @@ const BOIDS_SEPARATION_STIFFNESS = 1.0;
 const BOIDS_ALIGNMENT_STIFFNESS = 10.0;
 const BOIDS_COHESION_STIFFNESS = 50.0;
 
-const AIR_DAMPING = 0.99;
-const GRAVITY = 25.0;
-
 const SPRING_STRENGTH = DISTANCE_STIFFNESS;
 const SEPARATION_STRENGTH = COLLISION_STIFFNESS;
-
-const ConstraintType = enum {
-    distance,
-    collision,
-    mouse_spring,
-};
-
-pub const Vec2 = struct {
-    x: f32,
-    y: f32,
-};
-
-const DistanceConstraint = struct {
-    particle_a: ParticleHandle,
-    particle_b: ParticleHandle,
-    rest_length: f32,
-    compliance: f32,
-    lagrange_multiplier: f32,
-
-    const Self = @This();
-
-    pub fn init(a: ParticleHandle, b: ParticleHandle, length: f32, stiffness: f32, dt: f32) Self {
-        return Self{
-            .particle_a = a,
-            .particle_b = b,
-            .rest_length = length,
-            .compliance = 1.0 / (stiffness * dt * dt),
-            .lagrange_multiplier = 0.0,
-        };
-    }
-
-    pub fn evaluate(self: *const Self) f32 {
-        const particle_a_ptr = getParticlePtr(self.particle_a) orelse return 0.0;
-        const particle_b_ptr = getParticlePtr(self.particle_b) orelse return 0.0;
-
-        const dx = particle_b_ptr.predicted_x - particle_a_ptr.predicted_x;
-        const dy = particle_b_ptr.predicted_y - particle_a_ptr.predicted_y;
-        const distance = @sqrt(dx * dx + dy * dy);
-        return distance - self.rest_length;
-    }
-
-    pub fn getGradients(self: *const Self) struct { ga: Vec2, gb: Vec2, valid: bool } {
-        const particle_a_ptr = getParticlePtr(self.particle_a) orelse return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 }, .valid = false };
-        const particle_b_ptr = getParticlePtr(self.particle_b) orelse return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 }, .valid = false };
-
-        const dx = particle_b_ptr.predicted_x - particle_a_ptr.predicted_x;
-        const dy = particle_b_ptr.predicted_y - particle_a_ptr.predicted_y;
-        const distance = @sqrt(dx * dx + dy * dy);
-
-        if (distance < 1e-6) {
-            return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 }, .valid = false };
-        }
-
-        const norm_x = dx / distance;
-        const norm_y = dy / distance;
-
-        return .{
-            .ga = Vec2{ .x = -norm_x, .y = -norm_y },
-            .gb = Vec2{ .x = norm_x, .y = norm_y },
-            .valid = true,
-        };
-    }
-};
-
-const CollisionConstraint = struct {
-    particle_a: ParticleHandle,
-    particle_b: ParticleHandle,
-    min_distance: f32,
-    compliance: f32,
-    lagrange_multiplier: f32,
-
-    const Self = @This();
-
-    pub fn init(a: ParticleHandle, b: ParticleHandle, min_dist: f32, stiffness: f32, dt: f32) Self {
-        return Self{
-            .particle_a = a,
-            .particle_b = b,
-            .min_distance = min_dist,
-            .compliance = 1.0 / (stiffness * dt * dt),
-            .lagrange_multiplier = 0.0,
-        };
-    }
-
-    pub fn evaluate(self: *const Self) f32 {
-        const particle_a_ptr = getParticlePtr(self.particle_a) orelse return 0.0;
-        const particle_b_ptr = getParticlePtr(self.particle_b) orelse return 0.0;
-
-        const dx = particle_b_ptr.predicted_x - particle_a_ptr.predicted_x;
-        const dy = particle_b_ptr.predicted_y - particle_a_ptr.predicted_y;
-        const distance = @sqrt(dx * dx + dy * dy);
-        return @min(0.0, distance - self.min_distance);
-    }
-
-    pub fn getGradients(self: *const Self) struct { ga: Vec2, gb: Vec2, valid: bool } {
-        const particle_a_ptr = getParticlePtr(self.particle_a) orelse return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 }, .valid = false };
-        const particle_b_ptr = getParticlePtr(self.particle_b) orelse return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 }, .valid = false };
-
-        const dx = particle_b_ptr.predicted_x - particle_a_ptr.predicted_x;
-        const dy = particle_b_ptr.predicted_y - particle_a_ptr.predicted_y;
-        const distance = @sqrt(dx * dx + dy * dy);
-
-        if (distance < 1e-6) {
-            return .{ .ga = Vec2{ .x = 0, .y = 0 }, .gb = Vec2{ .x = 0, .y = 0 }, .valid = false };
-        }
-
-        const norm_x = dx / distance;
-        const norm_y = dy / distance;
-
-        return .{
-            .ga = Vec2{ .x = -norm_x, .y = -norm_y },
-            .gb = Vec2{ .x = norm_x, .y = norm_y },
-            .valid = true,
-        };
-    }
-};
-
-const SeparationConstraint = struct {
-    particle_a: ParticleHandle,
-    particle_b: ParticleHandle,
-    target_distance: f32,
-    compliance: f32,
-    lagrange_multiplier: f32,
-
-    const Self = @This();
-
-    pub fn init(a: ParticleHandle, b: ParticleHandle, target_dist: f32, stiffness: f32, dt: f32) Self {
-        return Self{
-            .particle_a = a,
-            .particle_b = b,
-            .target_distance = target_dist,
-            .compliance = 1.0 / (stiffness * dt * dt),
-            .lagrange_multiplier = 0.0,
-        };
-    }
-};
-
-const AlignmentConstraint = struct {
-    particle_a: ParticleHandle,
-    neighbor_particles: [16]ParticleHandle,
-    neighbor_count: u32,
-    compliance: f32,
-    lagrange_multiplier: f32,
-
-    const Self = @This();
-
-    pub fn init(a: ParticleHandle, stiffness: f32, dt: f32) Self {
-        return Self{
-            .particle_a = a,
-            .neighbor_particles = undefined,
-            .neighbor_count = 0,
-            .compliance = 1.0 / (stiffness * dt * dt),
-            .lagrange_multiplier = 0.0,
-        };
-    }
-};
-
-const CohesionConstraint = struct {
-    particle_a: ParticleHandle,
-    target_x: f32,
-    target_y: f32,
-    compliance: f32,
-    lagrange_multiplier: f32,
-
-    const Self = @This();
-
-    pub fn init(a: ParticleHandle, target_x: f32, target_y: f32, stiffness: f32, dt: f32) Self {
-        return Self{
-            .particle_a = a,
-            .target_x = target_x,
-            .target_y = target_y,
-            .compliance = 1.0 / (stiffness * dt * dt),
-            .lagrange_multiplier = 0.0,
-        };
-    }
-};
 
 const GRID_MAX_SPRINGS = GRID_COUNT * PARTICLES_PER_GRID * 4;
 const USER_ADDED_MAX_SPRINGS = EXTRA_PARTICLE_SLOTS * 2;
@@ -345,25 +171,15 @@ pub const Spring = struct {
 
 const MAX_DISTANCE_CONSTRAINTS = MAX_SPRINGS;
 const MAX_COLLISION_CONSTRAINTS = 50000;
-
-var distance_constraints: [MAX_DISTANCE_CONSTRAINTS]DistanceConstraint = undefined;
-var distance_constraint_count: u32 = 0;
-
-var collision_constraints: [MAX_COLLISION_CONSTRAINTS]CollisionConstraint = undefined;
-var collision_constraint_count: u32 = 0;
-
 const MAX_BOIDS_SEPARATION_CONSTRAINTS = FREE_AGENT_COUNT * 16;
 const MAX_BOIDS_ALIGNMENT_CONSTRAINTS = FREE_AGENT_COUNT;
 const MAX_BOIDS_COHESION_CONSTRAINTS = FREE_AGENT_COUNT;
 
-var boids_separation_constraints: [MAX_BOIDS_SEPARATION_CONSTRAINTS]SeparationConstraint = undefined;
-var boids_separation_constraint_count: u32 = 0;
-
-var boids_alignment_constraints: [MAX_BOIDS_ALIGNMENT_CONSTRAINTS]AlignmentConstraint = undefined;
-var boids_alignment_constraint_count: u32 = 0;
-
-var boids_cohesion_constraints: [MAX_BOIDS_COHESION_CONSTRAINTS]CohesionConstraint = undefined;
-var boids_cohesion_constraint_count: u32 = 0;
+var distance_constraints: [MAX_DISTANCE_CONSTRAINTS]physics.DistanceConstraint = undefined;
+var collision_constraints: [MAX_COLLISION_CONSTRAINTS]physics.CollisionConstraint = undefined;
+var boids_separation_constraints: [MAX_BOIDS_SEPARATION_CONSTRAINTS]physics.SeparationConstraint = undefined;
+var boids_alignment_constraints: [MAX_BOIDS_ALIGNMENT_CONSTRAINTS]physics.AlignmentConstraint = undefined;
+var boids_cohesion_constraints: [MAX_BOIDS_COHESION_CONSTRAINTS]physics.CohesionConstraint = undefined;
 
 var particle_arena: generational.GenerationalArena(Particle, PARTICLE_COUNT) = undefined;
 var particles_initialized = false;
@@ -377,6 +193,8 @@ var particle_connection_counts: [PARTICLE_COUNT]u8 = undefined;
 
 var particle_bulk_buffer: [PARTICLE_COUNT * 4]f32 = undefined;
 var spring_bulk_buffer: [MAX_SPRINGS * 4]f32 = undefined;
+
+var physics_system: physics.PhysicsSystem = undefined;
 
 extern fn emscripten_webgpu_get_device() u32;
 extern fn console_log(ptr: [*]const u8, len: usize) void;
@@ -395,6 +213,43 @@ fn initializeParticleSystems() void {
 
 fn initializeSpringSystems() void {
     spring_arena = SpringArena.init();
+}
+
+// Physics system callback functions
+fn getParticlePtrCallback(handle: ParticleHandle) ?*anyopaque {
+    if (particle_arena.getMut(handle)) |particle| {
+        return @ptrCast(particle);
+    }
+    return null;
+}
+
+fn getSpringPtrCallback(handle: SpringHandle) ?*anyopaque {
+    if (spring_arena.getMut(handle)) |spring| {
+        return @ptrCast(spring);
+    }
+    return null;
+}
+
+fn destroySpringCallback(handle: SpringHandle) void {
+    destroySpring(handle);
+}
+
+fn getDenseParticleIndexCallback(handle: ParticleHandle) ?u32 {
+    return particle_arena.getDenseIndex(handle);
+}
+
+fn initializePhysicsSystem() void {
+    physics_system = physics.PhysicsSystem.init(
+        &distance_constraints,
+        &collision_constraints,
+        &boids_separation_constraints,
+        &boids_alignment_constraints,
+        &boids_cohesion_constraints,
+        getParticlePtrCallback,
+        getSpringPtrCallback,
+        destroySpringCallback,
+        getDenseParticleIndexCallback,
+    );
 }
 
 pub fn spawnParticle(particle: Particle) ParticleHandle {
@@ -548,350 +403,6 @@ pub fn setParticleConnection(particle_index: u32, connection_index: u8, spring_h
     particle_connections[particle_index][connection_index] = spring_handle;
 }
 
-fn generateConstraints(dt: f32) void {
-    distance_constraint_count = 0;
-    collision_constraint_count = 0;
-    boids_separation_constraint_count = 0;
-    boids_alignment_constraint_count = 0;
-    boids_cohesion_constraint_count = 0;
-
-    var springs_to_remove: [MAX_SPRINGS]SpringHandle = undefined;
-    var remove_count: u32 = 0;
-
-    const dense_springs = spring_arena.getDenseData();
-    const dense_spring_handles = spring_arena.getDenseHandles();
-    const spring_count = spring_arena.getDenseCount();
-
-    for (0..spring_count) |i| {
-        const spring = &dense_springs[i];
-        const spring_handle = dense_spring_handles[i];
-
-        const particle_a = getParticlePtr(spring.particle_a);
-        const particle_b = getParticlePtr(spring.particle_b);
-
-        if (particle_a != null and particle_b != null) {
-            const dx = particle_b.?.x - particle_a.?.x;
-            const dy = particle_b.?.y - particle_a.?.y;
-            const current_length = @sqrt(dx * dx + dy * dy);
-
-            const is_mouse_spring = mouse.isMouseParticle(spring.particle_a) or mouse.isMouseParticle(spring.particle_b);
-            const max_allowed_length = if (is_mouse_spring) spring.rest_length * 10.0 else spring.rest_length * 2.0;
-            const min_allowed_length = if (is_mouse_spring) spring.rest_length * 0.5 else spring.rest_length * 0.5;
-
-            if (current_length > max_allowed_length or current_length < min_allowed_length) {
-                if (remove_count < MAX_SPRINGS) {
-                    springs_to_remove[remove_count] = spring_handle;
-                    remove_count += 1;
-
-                    particle_a.?.current_valence = @max(0, particle_a.?.current_valence - 1);
-                    particle_b.?.current_valence = @max(0, particle_b.?.current_valence - 1);
-                }
-            } else if (distance_constraint_count < MAX_DISTANCE_CONSTRAINTS) {
-                const spring_compliance = 1.0 / (DISTANCE_STIFFNESS * dt * dt);
-                distance_constraints[distance_constraint_count] = DistanceConstraint{
-                    .particle_a = spring.particle_a,
-                    .particle_b = spring.particle_b,
-                    .rest_length = spring.rest_length,
-                    .compliance = spring_compliance,
-                    .lagrange_multiplier = 0.0,
-                };
-                distance_constraint_count += 1;
-            }
-        }
-    }
-
-    for (0..remove_count) |j| {
-        destroySpring(springs_to_remove[j]);
-    }
-
-    const dense_particles = particle_arena.getDenseDataMut();
-    const dense_particle_handles = particle_arena.getDenseHandles();
-    const dense_particle_count = particle_arena.getDenseCount();
-
-    spatial.populateGrid(dense_particles, dense_particle_count);
-
-    for (0..dense_particle_count) |i| {
-        if (!mouse.isMouseParticle(dense_particle_handles[i])) {
-            generateCollisionConstraintsForParticle(dense_particle_handles[i], dt, dense_particle_handles, dense_particle_count);
-        }
-    }
-}
-
-fn generateCollisionConstraintsForParticle(particle_handle: ParticleHandle, dt: f32, handles_array: []const ParticleHandle, handles_count: u32) void {
-    const particle = getParticlePtr(particle_handle) orelse return;
-
-    const gx = spatial.worldToGridX(particle.predicted_x);
-    const gy = spatial.worldToGridY(particle.predicted_y);
-
-    var dy: i32 = -1;
-    while (dy <= 1) : (dy += 1) {
-        var dx: i32 = -1;
-        while (dx <= 1) : (dx += 1) {
-            const check_x = gx + dx;
-            const check_y = gy + dy;
-
-            if (check_x >= 0 and check_x < @as(i32, @intCast(spatial.grid_size_x)) and check_y >= 0 and check_y < @as(i32, @intCast(spatial.grid_size_y))) {
-                const cell = &spatial.spatial_grid[@intCast(check_x)][@intCast(check_y)];
-
-                for (0..cell.count) |i| {
-                    const neighbor_index = cell.particles[i];
-
-                    if (neighbor_index >= handles_count) continue;
-                    const neighbor_handle = handles_array[neighbor_index];
-
-                    if (!neighbor_handle.eql(particle_handle) and
-                        particle_handle.index < neighbor_handle.index and
-                        !mouse.isMouseParticle(neighbor_handle))
-                    {
-                        const other = getParticlePtr(neighbor_handle) orelse continue;
-                        const dx_pred = particle.predicted_x - other.predicted_x;
-                        const dy_pred = particle.predicted_y - other.predicted_y;
-                        const dist_sq = dx_pred * dx_pred + dy_pred * dy_pred;
-
-                        const ball_radius = PARTICLE_SIZE;
-                        const contact_distance = ball_radius * 2.0;
-                        const current_distance = @sqrt(dist_sq);
-
-                        if (current_distance < contact_distance) {
-                            if (collision_constraint_count < MAX_COLLISION_CONSTRAINTS) {
-                                const billiard_stiffness = COLLISION_STIFFNESS * 10.0;
-                                const collision_compliance = 1.0 / (billiard_stiffness * dt * dt);
-
-                                collision_constraints[collision_constraint_count] = CollisionConstraint{
-                                    .particle_a = particle_handle,
-                                    .particle_b = neighbor_handle,
-                                    .min_distance = contact_distance,
-                                    .compliance = collision_compliance,
-                                    .lagrange_multiplier = 0.0,
-                                };
-                                collision_constraint_count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn solveConstraints(dt: f32) void {
-    for (0..distance_constraint_count) |i| {
-        solveDistanceConstraint(&distance_constraints[i], dt);
-    }
-
-    for (0..collision_constraint_count) |i| {
-        solveCollisionConstraint(&collision_constraints[i], dt);
-    }
-
-    for (0..boids_separation_constraint_count) |i| {
-        solveSeparationConstraint(&boids_separation_constraints[i], dt);
-    }
-
-    for (0..boids_alignment_constraint_count) |i| {
-        solveAlignmentConstraint(&boids_alignment_constraints[i], dt);
-    }
-
-    for (0..boids_cohesion_constraint_count) |i| {
-        solveCohesionConstraint(&boids_cohesion_constraints[i], dt);
-    }
-}
-
-fn solveCollisionConstraintsOnly(dt: f32) void {
-    for (0..collision_constraint_count) |i| {
-        solveCollisionConstraint(&collision_constraints[i], dt);
-    }
-}
-
-inline fn getDenseParticleIndex(handle: ParticleHandle) ?u32 {
-    return particle_arena.getDenseIndex(handle);
-}
-
-fn solveDistanceConstraint(constraint: *DistanceConstraint, dt: f32) void {
-    const idx_a = getDenseParticleIndex(constraint.particle_a) orelse return;
-    const idx_b = getDenseParticleIndex(constraint.particle_b) orelse return;
-
-    const dense_particles = particle_arena.getDenseDataMut();
-    const particle_a = &dense_particles[idx_a];
-    const particle_b = &dense_particles[idx_b];
-
-    const dx = particle_a.predicted_x - particle_b.predicted_x;
-    const dy = particle_a.predicted_y - particle_b.predicted_y;
-    const current_distance = @sqrt(dx * dx + dy * dy);
-
-    if (current_distance < 0.001) return;
-
-    const constraint_value = current_distance - constraint.rest_length;
-
-    const grad_x = dx / current_distance;
-    const grad_y = dy / current_distance;
-
-    const w_a = 1.0 / particle_a.mass;
-    const w_b = 1.0 / particle_b.mass;
-    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
-    const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
-
-    if (denominator < 0.001) return;
-
-    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
-
-    constraint.lagrange_multiplier += delta_lambda;
-
-    const correction_a_x = w_a * delta_lambda * grad_x;
-    const correction_a_y = w_a * delta_lambda * grad_y;
-    const correction_b_x = -w_b * delta_lambda * grad_x;
-    const correction_b_y = -w_b * delta_lambda * grad_y;
-
-    particle_a.predicted_x += correction_a_x;
-    particle_a.predicted_y += correction_a_y;
-    particle_b.predicted_x += correction_b_x;
-    particle_b.predicted_y += correction_b_y;
-}
-
-fn solveCollisionConstraint(constraint: *CollisionConstraint, dt: f32) void {
-    _ = dt;
-    const idx_a = getDenseParticleIndex(constraint.particle_a) orelse return;
-    const idx_b = getDenseParticleIndex(constraint.particle_b) orelse return;
-
-    const dense_particles = particle_arena.getDenseDataMut();
-    const particle_a = &dense_particles[idx_a];
-    const particle_b = &dense_particles[idx_b];
-
-    const dx = particle_a.predicted_x - particle_b.predicted_x;
-    const dy = particle_a.predicted_y - particle_b.predicted_y;
-    const current_distance = @sqrt(dx * dx + dy * dy);
-
-    if (current_distance < 0.001) {
-        particle_a.predicted_x += 0.01;
-        particle_b.predicted_x -= 0.01;
-        return;
-    }
-
-    const constraint_value = constraint.min_distance - current_distance;
-
-    if (constraint_value <= 0) return;
-
-    const normal_x = dx / current_distance;
-    const normal_y = dy / current_distance;
-
-    const separation = constraint_value * 0.5;
-    particle_a.predicted_x += normal_x * separation;
-    particle_a.predicted_y += normal_y * separation;
-    particle_b.predicted_x -= normal_x * separation;
-    particle_b.predicted_y -= normal_y * separation;
-
-    const rel_vx = particle_a.vx - particle_b.vx;
-    const rel_vy = particle_a.vy - particle_b.vy;
-    const rel_vel_normal = rel_vx * normal_x + rel_vy * normal_y;
-
-    if (rel_vel_normal > 0) return;
-
-    const restitution = 0.9;
-    const impulse_magnitude = -(1.0 + restitution) * rel_vel_normal / (1.0 / particle_a.mass + 1.0 / particle_b.mass);
-
-    const impulse_x = impulse_magnitude * normal_x;
-    const impulse_y = impulse_magnitude * normal_y;
-
-    particle_a.vx += impulse_x / particle_a.mass;
-    particle_a.vy += impulse_y / particle_a.mass;
-    particle_b.vx -= impulse_x / particle_b.mass;
-    particle_b.vy -= impulse_y / particle_b.mass;
-}
-
-fn solveSeparationConstraint(constraint: *SeparationConstraint, dt: f32) void {
-    const particle_a = getParticlePtr(constraint.particle_a) orelse return;
-    const particle_b = getParticlePtr(constraint.particle_b) orelse return;
-
-    const dx = particle_a.predicted_x - particle_b.predicted_x;
-    const dy = particle_a.predicted_y - particle_b.predicted_y;
-    const current_distance = @sqrt(dx * dx + dy * dy);
-
-    if (current_distance < 0.001) return;
-
-    if (current_distance >= constraint.target_distance) return;
-
-    const constraint_value = constraint.target_distance - current_distance;
-
-    const grad_x = -dx / current_distance;
-    const grad_y = -dy / current_distance;
-
-    const w_a = 1.0 / particle_a.mass;
-    const w_b = 1.0 / particle_b.mass;
-    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
-    const denominator = w_a * grad_length_sq + w_b * grad_length_sq + constraint.compliance / (dt * dt);
-
-    if (denominator < 0.001) return;
-
-    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
-
-    constraint.lagrange_multiplier += delta_lambda;
-
-    const correction_a_x = w_a * delta_lambda * grad_x;
-    const correction_a_y = w_a * delta_lambda * grad_y;
-    const correction_b_x = -w_b * delta_lambda * grad_x;
-    const correction_b_y = -w_b * delta_lambda * grad_y;
-
-    particle_a.predicted_x += correction_a_x;
-    particle_a.predicted_y += correction_a_y;
-    particle_b.predicted_x += correction_b_x;
-    particle_b.predicted_y += correction_b_y;
-}
-
-fn solveAlignmentConstraint(constraint: *AlignmentConstraint, dt: f32) void {
-    const particle = getParticlePtr(constraint.particle_a) orelse return;
-
-    if (constraint.neighbor_count == 0) return;
-
-    var avg_vx: f32 = 0;
-    var avg_vy: f32 = 0;
-    var valid_neighbors: u32 = 0;
-
-    for (0..constraint.neighbor_count) |i| {
-        if (getParticlePtr(constraint.neighbor_particles[i])) |neighbor| {
-            avg_vx += neighbor.vx;
-            avg_vy += neighbor.vy;
-            valid_neighbors += 1;
-        }
-    }
-
-    if (valid_neighbors == 0) return;
-
-    avg_vx /= @as(f32, @floatFromInt(valid_neighbors));
-    avg_vy /= @as(f32, @floatFromInt(valid_neighbors));
-
-    const velocity_diff_x = avg_vx - particle.vx;
-    const velocity_diff_y = avg_vy - particle.vy;
-
-    const alignment_strength = 1.0 / (constraint.compliance + dt * dt);
-    const correction_x = velocity_diff_x * dt * alignment_strength * 0.01;
-    const correction_y = velocity_diff_y * dt * alignment_strength * 0.01;
-
-    particle.predicted_x += correction_x;
-    particle.predicted_y += correction_y;
-}
-
-fn solveCohesionConstraint(constraint: *CohesionConstraint, dt: f32) void {
-    const particle = getParticlePtr(constraint.particle_a) orelse return;
-
-    const dx = particle.predicted_x - constraint.target_x;
-    const dy = particle.predicted_y - constraint.target_y;
-    const distance_to_center = @sqrt(dx * dx + dy * dy);
-
-    if (distance_to_center < 0.001) return;
-
-    const constraint_value = distance_to_center;
-
-    const grad_x = dx / distance_to_center;
-    const grad_y = dy / distance_to_center;
-
-    const cohesion_strength = 1.0 / (constraint.compliance + dt * dt);
-
-    const correction_x = -grad_x * constraint_value * cohesion_strength * 0.001;
-    const correction_y = -grad_y * constraint_value * cohesion_strength * 0.001;
-
-    particle.predicted_x += correction_x;
-    particle.predicted_y += correction_y;
-}
-
 fn updateValenceBonds() void {
     const dense_particles = particle_arena.getDenseDataMut();
     const dense_particle_handles = particle_arena.getDenseHandles();
@@ -968,6 +479,7 @@ export fn init() void {
     if (!particles_initialized) {
         initializeParticleSystems();
         initializeSpringSystems();
+        initializePhysicsSystem();
         reset_module.initializeGridParticles();
         reset_module.initializeFreeAgents();
         particles_initialized = true;
@@ -991,6 +503,7 @@ export fn reset() void {
 
     initializeParticleSystems();
     initializeSpringSystems();
+    initializePhysicsSystem();
 
     reset_module.initializeGridParticles();
     reset_module.initializeFreeAgents();
@@ -1011,14 +524,32 @@ export fn update_particles(dt: f32) void {
 
     updateValenceBonds();
 
-    generateConstraints(dt);
+    // Use physics system to generate and solve constraints
+    const dense_springs = spring_arena.getDenseData();
+    const dense_spring_handles = spring_arena.getDenseHandles();
+    const spring_count = spring_arena.getDenseCount();
+    const dense_particles = particle_arena.getDenseDataMut();
+    const dense_particle_handles = particle_arena.getDenseHandles();
+    const dense_particle_count = particle_arena.getDenseCount();
+
+    physics_system.generateConstraints(
+        dt,
+        dense_springs,
+        dense_spring_handles,
+        spring_count,
+        dense_particles,
+        dense_particle_handles,
+        dense_particle_count,
+        DISTANCE_STIFFNESS,
+        COLLISION_STIFFNESS,
+    );
 
     for (0..XPBD_ITERATIONS) |_| {
-        solveConstraints(dt);
+        physics_system.solveConstraints(dt, particle_arena.getDenseDataMut());
     }
 
     for (0..XPBD_SUBSTEPS) |_| {
-        solveCollisionConstraintsOnly(dt);
+        physics_system.solveCollisionConstraintsOnly(dt, particle_arena.getDenseDataMut());
     }
 
     updatePositionsForAliveParticles(dt);
@@ -1186,8 +717,8 @@ export fn get_spring_data_bulk() [*]f32 {
     for (0..spring_count) |i| {
         const spring = &dense_springs[i];
 
-        const idx_a = getDenseParticleIndex(spring.particle_a);
-        const idx_b = getDenseParticleIndex(spring.particle_b);
+        const idx_a = particle_arena.getDenseIndex(spring.particle_a);
+        const idx_b = particle_arena.getDenseIndex(spring.particle_b);
 
         if (idx_a != null and idx_b != null and write_index + 3 < MAX_SPRINGS * 4) {
             const dense_particles = particle_arena.getDenseData();
