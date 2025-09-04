@@ -3,6 +3,7 @@ const math = std.math;
 const spatial = @import("spatial.zig");
 const reset_module = @import("reset.zig");
 const generational = @import("generational.zig");
+const mouse = @import("mouse.zig");
 
 // XPBD particle system: grids + free agents
 pub const GRID_COUNT = 5;
@@ -23,7 +24,7 @@ var world_width: f32 = WORLD_SIZE;
 var world_height: f32 = WORLD_SIZE;
 
 // XPBD solver parameters
-const XPBD_ITERATIONS = 1; // Constraint solver iterations per timestep
+const XPBD_ITERATIONS = 6; // Constraint solver iterations per timestep
 const XPBD_SUBSTEPS = 6; // Number of substeps per frame
 
 // Constraint parameters (compliance = 1/(stiffness * dt²))
@@ -46,7 +47,7 @@ const BOIDS_COHESION_STIFFNESS = 50.0;
 
 // Air resistance
 const AIR_DAMPING = 0.99; // Slight damping to prevent infinite acceleration
-const GRAVITY = 10.0; // Gravity acceleration (in pixels/s²)
+const GRAVITY = 25.0; // Gravity acceleration (in pixels/s²)
 
 // Legacy constants for compatibility
 const SPRING_STRENGTH = DISTANCE_STIFFNESS;
@@ -360,9 +361,6 @@ var distance_constraint_count: u32 = 0;
 var collision_constraints: [MAX_COLLISION_CONSTRAINTS]CollisionConstraint = undefined;
 var collision_constraint_count: u32 = 0;
 
-// Mouse constraint
-var mouse_constraint: ?DistanceConstraint = null;
-
 // Boids constraint arrays
 const MAX_BOIDS_SEPARATION_CONSTRAINTS = FREE_AGENT_COUNT * 16; // Max 16 neighbors per boid
 const MAX_BOIDS_ALIGNMENT_CONSTRAINTS = FREE_AGENT_COUNT; // One per free agent
@@ -464,13 +462,6 @@ pub fn getSpring(handle: SpringHandle) ?Spring {
     return null;
 }
 
-// Mouse interaction state
-var mouse_x: f32 = 0.0;
-var mouse_y: f32 = 0.0;
-var mouse_pressed: bool = false;
-var mouse_connected_particle: ParticleHandle = ParticleHandle.invalid();
-var mouse_has_connection: bool = false;
-
 // Mock WebGPU bindings (not actually used for rendering)
 extern fn emscripten_webgpu_get_device() u32;
 
@@ -483,7 +474,6 @@ fn log(comptime fmt: []const u8, args: anytype) void {
     console_log(message.ptr, message.len);
 }
 
-
 var device_handle: u32 = 0;
 
 // Use the arena's dense arrays for performance
@@ -493,14 +483,24 @@ var device_handle: u32 = 0;
 // Fast helper functions using dense arrays
 fn predictPositionsForAliveParticles(dt: f32) void {
     const dense_data = particle_arena.getDenseDataMut();
-    for (dense_data) |*particle| {
+    const dense_handles = particle_arena.getDenseHandles();
+    for (dense_data, 0..) |*particle, i| {
+        // Skip mouse particle - it should not be affected by physics
+        if (mouse.isMouseParticle(dense_handles[i])) {
+            continue;
+        }
         particle.predictPosition(dt);
     }
 }
 
 fn updatePositionsForAliveParticles(dt: f32) void {
     const dense_data = particle_arena.getDenseDataMut();
-    for (dense_data) |*particle| {
+    const dense_handles = particle_arena.getDenseHandles();
+    for (dense_data, 0..) |*particle, i| {
+        // Skip mouse particle - it maintains its own position
+        if (mouse.isMouseParticle(dense_handles[i])) {
+            continue;
+        }
         particle.updateFromPrediction(dt);
     }
 }
@@ -624,11 +624,14 @@ fn generateConstraints(dt: f32) void {
 
         // Validate both particles are alive
         if (particle_a != null and particle_b != null) {
-            // Check if spring is overstretched (2x rest length)
+            // Check if spring is overstretched - mouse springs get higher threshold
             const dx = particle_b.?.x - particle_a.?.x;
             const dy = particle_b.?.y - particle_a.?.y;
             const current_length = @sqrt(dx * dx + dy * dy);
-            const max_allowed_length = spring.rest_length * 2.0;
+
+            // Mouse springs get much higher break threshold (10x vs 2x)
+            const is_mouse_spring = mouse.isMouseParticle(spring.particle_a) or mouse.isMouseParticle(spring.particle_b);
+            const max_allowed_length = if (is_mouse_spring) spring.rest_length * 10.0 else spring.rest_length * 2.0;
 
             if (current_length > max_allowed_length) {
                 // Mark spring for removal and refund valence
@@ -664,24 +667,6 @@ fn generateConstraints(dt: f32) void {
     // Dense arrays will be rebuilt at the start of the next frame, preserving
     // the current physics state (velocities, positions) until then.
 
-    // Generate mouse constraint if active
-    if (mouse_has_connection and mouse_connected_particle.isValid()) {
-        if (getParticlePtr(mouse_connected_particle) != null) {
-            mouse_constraint = DistanceConstraint{
-                .particle_a = mouse_connected_particle,
-                .particle_b = ParticleHandle.invalid(), // Mouse is external
-                .rest_length = 0.0, // Pull directly to mouse
-                .compliance = 1.0 / (SPRING_STRENGTH * 500.0 * dt * dt), // Very strong
-                .lagrange_multiplier = 0.0,
-            };
-        } else {
-            mouse_constraint = null;
-            mouse_has_connection = false; // Clear invalid connection
-        }
-    } else {
-        mouse_constraint = null;
-    }
-
     // Generate collision constraints using spatial grid (use dense arrays)
     const dense_particles = particle_arena.getDenseDataMut();
     const dense_particle_handles = particle_arena.getDenseHandles();
@@ -690,7 +675,10 @@ fn generateConstraints(dt: f32) void {
     spatial.populateGrid(dense_particles, dense_particle_count);
 
     for (0..dense_particle_count) |i| {
-        generateCollisionConstraintsForParticle(dense_particle_handles[i], dt, dense_particle_handles, dense_particle_count);
+        // Skip mouse particle - it should not participate in collisions
+        if (!mouse.isMouseParticle(dense_particle_handles[i])) {
+            generateCollisionConstraintsForParticle(dense_particle_handles[i], dt, dense_particle_handles, dense_particle_count);
+        }
     }
 
     // Generate boids constraints for initial free agents only (not user-added particles)
@@ -724,7 +712,11 @@ fn generateCollisionConstraintsForParticle(particle_handle: ParticleHandle, dt: 
                     const neighbor_handle = handles_array[neighbor_index];
 
                     // Avoid duplicates by comparing handle indices and only process if current < neighbor
-                    if (!neighbor_handle.eql(particle_handle) and particle_handle.index < neighbor_handle.index) {
+                    // Also skip if either particle is the mouse particle
+                    if (!neighbor_handle.eql(particle_handle) and
+                        particle_handle.index < neighbor_handle.index and
+                        !mouse.isMouseParticle(neighbor_handle))
+                    {
                         const other = getParticlePtr(neighbor_handle) orelse continue;
                         const dx_pred = particle.predicted_x - other.predicted_x;
                         const dy_pred = particle.predicted_y - other.predicted_y;
@@ -766,11 +758,6 @@ fn solveConstraints(dt: f32) void {
     // Solve distance constraints
     for (0..distance_constraint_count) |i| {
         solveDistanceConstraint(&distance_constraints[i], dt);
-    }
-
-    // Solve mouse constraint if active
-    if (mouse_constraint) |*constraint| {
-        solveMouseConstraint(constraint, dt);
     }
 
     // Solve collision constraints
@@ -853,47 +840,6 @@ fn solveDistanceConstraint(constraint: *DistanceConstraint, dt: f32) void {
     particle_a.predicted_y += correction_a_y;
     particle_b.predicted_x += correction_b_x;
     particle_b.predicted_y += correction_b_y;
-}
-
-// Solve mouse constraint (particle to mouse position) - optimized version
-fn solveMouseConstraint(constraint: *DistanceConstraint, dt: f32) void {
-    const idx_a = getDenseParticleIndex(constraint.particle_a) orelse return;
-    const dense_particles = particle_arena.getDenseDataMut();
-    const particle = &dense_particles[idx_a];
-
-    // Calculate constraint value C(x) = |x_particle - x_mouse| - rest_length
-    const dx = particle.predicted_x - mouse_x;
-    const dy = particle.predicted_y - mouse_y;
-    const current_distance = @sqrt(dx * dx + dy * dy);
-
-    if (current_distance < 0.001) return; // Avoid division by zero
-
-    const constraint_value = current_distance - constraint.rest_length;
-
-    // Calculate constraint gradient ∇C
-    const grad_x = dx / current_distance;
-    const grad_y = dy / current_distance;
-
-    // Mouse has infinite mass, so only particle moves
-    const w_particle = 1.0 / particle.mass;
-    const grad_length_sq = grad_x * grad_x + grad_y * grad_y;
-    const denominator = w_particle * grad_length_sq + constraint.compliance / (dt * dt);
-
-    if (denominator < 0.001) return; // Avoid division by zero
-
-    // Calculate delta Lagrange multiplier
-    const delta_lambda = -(constraint_value + constraint.compliance * constraint.lagrange_multiplier / (dt * dt)) / denominator;
-
-    // Update Lagrange multiplier
-    constraint.lagrange_multiplier += delta_lambda;
-
-    // Apply position correction only to particle
-    const correction_x = w_particle * delta_lambda * grad_x;
-    const correction_y = w_particle * delta_lambda * grad_y;
-
-    // Update predicted position
-    particle.predicted_x += correction_x;
-    particle.predicted_y += correction_y;
 }
 
 // Solve individual collision constraint using billiard ball physics - optimized version
@@ -1097,15 +1043,17 @@ export fn init() void {
         springs_initialized = true;
         log("Created {} spring connections for {} grids", .{ getSpringCount(), GRID_COUNT });
     }
+
+    // Initialize mouse system
+    mouse.initMouseSystem();
+    log("Mouse interaction system initialized", .{});
 }
 
 export fn reset() void {
     log("Resetting particle system...", .{});
 
-    // Reset mouse interaction
-    mouse_pressed = false;
-    mouse_has_connection = false;
-    mouse_connected_particle = ParticleHandle.invalid();
+    // Reset mouse interaction system
+    mouse.initMouseSystem();
 
     // Reset generational storage
     initializeParticleSystems();
@@ -1135,6 +1083,9 @@ export fn update_particles(dt: f32) void {
 
     // Step 1: Predict positions for all alive particles (using dense arrays)
     predictPositionsForAliveParticles(dt);
+
+    // Update mouse particle physics (ensure it stays locked to cursor)
+    mouse.updateMousePhysics();
 
     // Step 2: Update valence-based bonds (check for new connections)
     updateValenceBonds();
@@ -1386,7 +1337,6 @@ var spring_bulk_buffer: [MAX_SPRINGS * 4]f32 = undefined;
 
 // Check for and form valence-based bonds between particles (using dense arrays)
 fn updateValenceBonds() void {
-    const bond_distance_threshold = PARTICLE_SIZE * 4.0; // Distance to form bonds
 
     // Get current dense arrays from arena
     const dense_particles = particle_arena.getDenseDataMut();
@@ -1408,12 +1358,16 @@ fn updateValenceBonds() void {
             // Skip if the other particle is already satisfied
             if (particle_b.current_valence >= particle_b.desired_valence) continue;
 
-            // Check if particles are close enough to bond
+            // Check if particles are at optimal bonding distance (not too close, not too far)
             const dx = particle_b.x - particle_a.x;
             const dy = particle_b.y - particle_a.y;
             const distance = @sqrt(dx * dx + dy * dy);
 
-            if (distance <= bond_distance_threshold) {
+            // Only bond if distance is close to desired spring rest length
+            const min_bond_distance = SPRING_REST_LENGTH * 0.9; // Not too close
+            const max_bond_distance = SPRING_REST_LENGTH * 1.1; // Not too far
+
+            if (distance >= min_bond_distance and distance <= max_bond_distance) {
                 // Check if they're not already connected by iterating springs
                 var already_connected = false;
                 const dense_springs = spring_arena.getDenseData();
@@ -1463,39 +1417,32 @@ fn initializeValenceCounts() void {
     countValenceFromAlivesprings();
 }
 
-// Mouse interaction functions
+// Mouse interaction functions - using new mouse system
 export fn set_mouse_interaction(x: f32, y: f32, pressed: bool) void {
-    mouse_x = x;
-    mouse_y = y;
-
-    if (pressed and !mouse_pressed) {
-        // Mouse just pressed - find closest particle and create connection
-        mouse_pressed = true;
-        const closest_index = findClosestParticleIndex(x, y);
-        mouse_connected_particle = getParticleHandleByIndex(closest_index) orelse ParticleHandle.invalid();
-        mouse_has_connection = mouse_connected_particle.isValid();
-    } else if (!pressed and mouse_pressed) {
-        // Mouse just released - remove connection
-        mouse_pressed = false;
-        mouse_has_connection = false;
-        mouse_connected_particle = ParticleHandle.invalid();
-    } else if (pressed and mouse_pressed) {
-        // Mouse still pressed - update position only
-        mouse_pressed = true;
-    }
+    mouse.updateMousePosition(x, y);
+    mouse.setMousePressed(pressed);
 }
 
 export fn get_mouse_connected_particle() i32 {
-    if (mouse_has_connection and mouse_connected_particle.isValid()) {
-        return @intCast(mouse_connected_particle.index);
+    // Return first grabbed particle, or -1 if none
+    if (mouse.getGrabbedParticle(0)) |handle| {
+        return @intCast(handle.index);
     }
     return -1;
 }
 
 export fn get_mouse_position_x() f32 {
-    return mouse_x;
+    return mouse.getMousePositionX();
 }
 
 export fn get_mouse_position_y() f32 {
-    return mouse_y;
+    return mouse.getMousePositionY();
+}
+
+export fn get_mouse_grab_count() i32 {
+    return @intCast(mouse.getGrabCount());
+}
+
+export fn is_mouse_pressed() bool {
+    return mouse.isMousePressed();
 }

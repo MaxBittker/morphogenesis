@@ -5,7 +5,6 @@
 - **Constants may change externally**: If you see that a constant has changed from under you, assume I did that intentionally and don't change it back without asking first.
 
 - **Avoid literal comments**: Don't leave comments that include literals which we have in code since it makes it annoying to edit the literals and creates repetitive maintenance overhead.
-
 ## Example
 
 **Bad:**

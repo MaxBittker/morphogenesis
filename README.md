@@ -12,8 +12,8 @@ A real-time particle simulation system exploring artificial life and morphogenes
 ## Prerequisites
 
 - **Zig 0.13.0+** - [Download from ziglang.org](https://ziglang.org/download/)
-- **Python 3** - For local development server
 - **WebGPU-compatible browser** - Chrome, Firefox, or Safari
+- **node** - For local development server
 
 ## Quick Start
 
@@ -64,44 +64,15 @@ A real-time particle simulation system exploring artificial life and morphogenes
 - Neural networks for growth/connection decisions
 - Complex emergent behaviors and shape formation
 
-## Performance Testing & Best Practices
+##  Testing & Best Practices
 
-### Stress Testing Methodology
-
-To find the optimal particle count for 60fps performance:
-
-1. **Edit particle count**: Modify `PARTICLE_COUNT` in `src/main.zig`
-   ```zig
-   const PARTICLE_COUNT = 1000; // Adjust this value
-   ```
-
-2. **Rebuild**: Run `./build.sh` to compile changes
-
-3. **Test with browser MCP**: Use browser automation to capture performance
+. **Test with browser MCP**: Use browser automation to capture performance
    - Navigate to `http://localhost:8000` 
    - Take screenshots to verify smooth animation
    - Monitor console for any errors
    - Observe flocking behavior quality
 
-4. **Performance benchmarks** (tested on M3 MacBook Pro):
 
-   **Before Spatial Partitioning (O(n²) algorithm)**:
-   - ✅ **150 particles**: Baseline performance, excellent flocking
-   - ⚠️ **300+ particles**: Frame drops, ~36fps performance
-
-   **After Spatial Partitioning (O(n) algorithm)**:
-   - ✅ **2000 particles**: Perfect 60fps, beautiful dense flocking
-   - ✅ **5000 particles**: Still 60fps, massive particle interactions
-   - ✅ **8000+ particles**: Maintained 60fps, spectacular swarm behavior
-   - 🎯 **Performance boost**: ~25x improvement with spatial optimization
-
-### Testing Best Practices
-
-- **Keep it simple**: Use code comments and rebuilds rather than runtime controls
-- **Browser MCP integration**: Perfect for automated testing and screenshots
-- **Incremental testing**: Start low, increase by 500-1000 particles per test
-- **Visual verification**: Screenshots show both performance and behavior quality
-- **Git commits**: Document each test configuration for reproducibility
 
 ### Algorithm Optimization
 
@@ -112,11 +83,24 @@ The Boids system uses **spatial partitioning** for O(n) performance:
 
 ### Buffer Allocation
 
-The JavaScript instance buffer is pre-allocated for 10,000 particles:
+The system uses a sophisticated multi-tier buffer allocation strategy implemented in Zig:
 
-```javascript
-const maxParticles = 10000; // Supports up to 10k particles
-```
+**Particle System:**
+- **Grid Particles**: 5 grids × 144 particles each = 720 structured particles
+- **Free Agents**: 1,000 boids/autonomous particles  
+- **User Expansion**: 10,000 slots for runtime particle addition
+- **Total Capacity**: ~11,720 particles with room for growth
+
+**Memory Management:**
+- **Generational Arena**: Safe handle-based particle references with O(1) spawn/destroy
+- **Dense Arrays**: Optimized iteration using packed alive particles only
+- **Spatial Grid**: Dynamic grid sizing with 500 particles per cell maximum
+- **Spring Network**: ~20,000+ spring capacity supporting complex connectivity
+
+**Performance Features:**
+- Bulk data transfer for WebGL rendering
+- Automatic memory defragmentation
+- Handle validation prevents use-after-free bugs
 
 ## Goal
 
